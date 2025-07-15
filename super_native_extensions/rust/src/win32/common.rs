@@ -1,4 +1,4 @@
-use std::{fs::OpenOptions, io::Write, mem::size_of, path::Path, ptr::null_mut};
+use std::{fs::OpenOptions, io::Write, mem::size_of, path::Path, ptr::null_mut, slice};
 
 use once_cell::sync::Lazy;
 use windows::{
@@ -14,9 +14,12 @@ use windows::{
             Com::{
                 CoCreateInstance, IDataObject, IStream, CLSCTX_ALL, DATADIR_GET, DVASPECT_CONTENT,
                 FORMATETC, TYMED, TYMED_HGLOBAL, TYMED_ISTREAM, TYMED_ISTORAGE, TYMED_FILE,
+                STGMEDIUM, STREAM_SEEK_SET,
             },
             DataExchange::{GetClipboardFormatNameW, RegisterClipboardFormatW, RegisterClipboardFormatA},
             LibraryLoader::{GetProcAddress, LoadLibraryA},
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            Ole::{ReleaseStgMedium, CF_HDROP},
         },
         UI::HiDpi::{MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE},
     },
@@ -39,6 +42,66 @@ const CF_UNIFORMRESOURCELOCATOR: &[u8] = b"UniformResourceLocator\0";
 const CF_HDROP_STR: &[u8] = b"CF_HDROP\0";
 const CF_TEXT_STR: &[u8] = b"CF_TEXT\0";
 const CF_UNICODETEXT_STR: &[u8] = b"CF_UNICODETEXT\0";
+
+/// Safe wrapper for IDataObject::GetData that prevents DV_E_FORMATETC from surfacing
+pub fn safe_get_data(obj: &IDataObject, fmt: &FORMATETC) -> NativeExtensionsResult<Option<STGMEDIUM>> {
+    unsafe {
+        // First check if format is available
+        if obj.QueryGetData(fmt).is_err() {
+            log::debug!("Format not available (QueryGetData failed), skipping: cfFormat={}, tymed={:?}", fmt.cfFormat, fmt.tymed);
+            return Ok(None);
+        }
+        
+        // Log the COM call for debugging
+        log::trace!("GetData cfFormat={}, tymed={:?}, lindex={}", fmt.cfFormat, fmt.tymed, fmt.lindex);
+        
+        match obj.GetData(fmt) {
+            Ok(medium) => Ok(Some(medium)),
+            Err(e) => {
+                if e.code().0 == 0x80040064 {
+                    // DV_E_FORMATETC - format not supported, this is expected
+                    log::debug!("DV_E_FORMATETC for format {}, returning None", fmt.cfFormat);
+                    Ok(None)
+                } else {
+                    // Other errors should be propagated
+                    Err(NativeExtensionsError::from(e))
+                }
+            }
+        }
+    }
+}
+
+/// Safe wrapper for IDataObject::EnumFormatEtc that handles DV_E_FORMATETC gracefully
+pub fn safe_enum_format_etc(obj: &IDataObject) -> NativeExtensionsResult<Vec<FORMATETC>> {
+    unsafe {
+        log::trace!("EnumFormatEtc");
+        
+        match obj.EnumFormatEtc(DATADIR_GET.0 as u32) {
+            Ok(enumerator) => {
+                let mut res = Vec::new();
+                loop {
+                    let mut format = [FORMATETC::default()];
+                    let mut fetched = 0u32;
+                    if enumerator.Next(&mut format, Some(&mut fetched as *mut _)).is_err() || fetched == 0 {
+                        break;
+                    }
+                    res.push(format[0]);
+                }
+                log::debug!("EnumFormatEtc succeeded, found {} formats", res.len());
+                Ok(res)
+            }
+            Err(e) if e.code().0 == 0x80040064 => {
+                // DV_E_FORMATETC - format enumeration not supported
+                log::debug!("DV_E_FORMATETC in EnumFormatEtc, using fallback formats");
+                Ok(try_common_outlook_formats(obj))
+            }
+            Err(e) => {
+                log::warn!("EnumFormatEtc failed with error: {}", e);
+                Err(NativeExtensionsError::from(e))
+            }
+        }
+    }
+}
 
 pub fn format_to_string(format: u32) -> String {
     let mut buf: [_; 1024] = [0u16; 1024];
@@ -237,27 +300,8 @@ pub fn try_common_outlook_formats(data_object: &IDataObject) -> Vec<FORMATETC> {
 }
 
 /// Safely enumerate formats with fallback for Outlook
-pub fn enumerate_formats_safely(data_object: &IDataObject) -> windows::core::Result<Vec<FORMATETC>> {
-    match unsafe { data_object.EnumFormatEtc(DATADIR_GET.0 as u32) } {
-        Ok(e) => {
-            let mut res = Vec::new();
-            loop {
-                let mut format = [FORMATETC::default()];
-                let mut fetched = 0u32;
-                if unsafe { e.Next(&mut format, Some(&mut fetched as *mut _)) }.is_err() || fetched == 0 {
-                    break;
-                }
-                res.push(format[0]);
-            }
-            Ok(res)
-        }
-        Err(e) if e.code() == DV_E_FORMATETC => {
-            // Log the error but continue with fallback formats
-            log::warn!("Format enumeration failed with DV_E_FORMATETC, using fallback formats: {}", e);
-            Ok(try_common_outlook_formats(data_object))
-        }
-        Err(e) => Err(e),
-    }
+pub fn enumerate_formats_safely(data_object: &IDataObject) -> NativeExtensionsResult<Vec<FORMATETC>> {
+    safe_enum_format_etc(data_object)
 }
 
 pub fn log_outlook_format_detection(data_object: &IDataObject) {
@@ -285,7 +329,7 @@ pub fn log_outlook_format_detection(data_object: &IDataObject) {
     }
 }
 
-pub fn extract_formats(object: &IDataObject) -> windows::core::Result<Vec<FORMATETC>> {
+pub fn extract_formats(object: &IDataObject) -> NativeExtensionsResult<Vec<FORMATETC>> {
     log::info!("Attempting to extract formats from data object");
     
     let result = enumerate_formats_safely(object);
@@ -507,4 +551,102 @@ pub fn copy_stream_to_file(stream: &IStream, path: &Path) -> NativeExtensionsRes
     })?;
 
     res
+}
+
+/// Check if format is available with fallback to Outlook formats
+pub fn has_format_with_outlook_fallback(data_object: &IDataObject, format: u32) -> bool {
+    // First try the requested format
+    if query_format_with_fallback_safe(data_object, format) {
+        return true;
+    }
+    
+    // If it's CF_HDROP and not available, try Outlook-specific formats
+    if format == CF_HDROP.0 as u32 {
+        log::debug!("CF_HDROP not available, trying Outlook formats");
+        
+        // Try FileGroupDescriptor format
+        if let Ok(fd_format) = unsafe { RegisterClipboardFormatA(CF_FILEDESCRIPTOR.as_ptr() as _) } {
+            if query_format_with_fallback_safe(data_object, fd_format) {
+                log::debug!("Found FileGroupDescriptor format as fallback for CF_HDROP");
+                return true;
+            }
+        }
+        
+        // Try FileContents format
+        if let Ok(fc_format) = unsafe { RegisterClipboardFormatA(CF_FILECONTENTS.as_ptr() as _) } {
+            if query_format_with_fallback_safe(data_object, fc_format) {
+                log::debug!("Found FileContents format as fallback for CF_HDROP");
+                return true;
+            }
+        }
+    }
+    
+    false
+}
+
+/// Extract data with fallback to Outlook formats
+pub fn get_data_with_outlook_fallback(data_object: &IDataObject, format: u32) -> NativeExtensionsResult<Option<Vec<u8>>> {
+    // First try the requested format
+    let format_etc = make_format_with_tymed(format, TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0));
+    
+    match safe_get_data(data_object, &format_etc) {
+        Ok(Some(medium)) => {
+            // Successfully got data, convert to Vec<u8>
+            let res = unsafe {
+                let mut medium = medium;
+                let result = if medium.tymed == TYMED_ISTREAM.0 as u32 {
+                    let stream = medium.u.pstm.as_ref().cloned();
+                    if let Some(stream) = stream {
+                        stream.Seek(0, STREAM_SEEK_SET, None)?;
+                        read_stream_fully(&stream)
+                    } else {
+                        Ok(Vec::new())
+                    }
+                } else if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+                    let size = GlobalSize(medium.u.hGlobal);
+                    let data = GlobalLock(medium.u.hGlobal);
+                    let v = slice::from_raw_parts(data as *const u8, size);
+                    let res: Vec<u8> = v.into();
+                    GlobalUnlock(medium.u.hGlobal).ok();
+                    Ok(res)
+                } else {
+                    Err(windows::core::Error::from(DV_E_FORMATETC))
+                };
+                ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                result
+            };
+            
+            match res {
+                Ok(data) => return Ok(Some(data)),
+                Err(e) => {
+                    log::debug!("Failed to extract data from medium: {}", e);
+                }
+            }
+        }
+        Ok(None) => {
+            log::debug!("Format {} not available, trying fallbacks", format);
+        }
+        Err(e) => {
+            log::debug!("Error getting format {}: {}", format, e);
+        }
+    }
+    
+    // If CF_HDROP failed, try Outlook-specific formats
+    if format == CF_HDROP.0 as u32 {
+        log::debug!("CF_HDROP not available, trying Outlook fallback formats");
+        
+        // Try FileGroupDescriptor + FileContents combination
+        if let Ok(fd_format) = unsafe { RegisterClipboardFormatA(CF_FILEDESCRIPTOR.as_ptr() as _) } {
+            let fd_format_etc = make_format_with_tymed(fd_format, TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0));
+            
+            if let Ok(Some(_descriptor_data)) = safe_get_data(data_object, &fd_format_etc) {
+                log::debug!("Found FileGroupDescriptor, this is an Outlook drag with virtual files");
+                // For now, return empty data to indicate format is available but with no files
+                // The actual file handling will be done by the FileContents format
+                return Ok(Some(Vec::new()));
+            }
+        }
+    }
+    
+    Ok(None)
 }

@@ -1,5 +1,7 @@
 ## 0.9.1
 
+ - **FIXED**: DV_E_FORMATETC error handling in Windows drag-and-drop operations. Improved handling of Outlook email drags and reduced log noise by downgrading expected format errors to debug level. Added safe COM call wrappers to prevent DV_E_FORMATETC from surfacing unnecessarily.
+
 ## 0.9.0
 
  - **FEAT**: add support for the maximum page size of 16 KB for Android (#521).

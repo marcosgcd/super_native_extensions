@@ -51,7 +51,7 @@ use super::{
     add_stream_entry,
     common::{
         as_u8_slice, format_from_string, format_to_string, make_format_with_tymed,
-        make_format_with_tymed_index, read_stream_fully,
+        make_format_with_tymed_index, read_stream_fully, safe_get_data,
     },
     image_conversion::convert_to_dib,
     virtual_file_stream::{VirtualFileStream, VirtualStreamSession},
@@ -758,6 +758,54 @@ pub trait GetData {
         }
     }
 
+    /// Safe wrapper for get_data that handles DV_E_FORMATETC gracefully
+    fn get_data_safe(&self, format: u32) -> NativeExtensionsResult<Option<Vec<u8>>> {
+        let format_etc = make_format_with_tymed(format, TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0));
+        
+        // Use safe_get_data wrapper - need to cast self to IDataObject
+        let data_obj = unsafe { 
+            std::mem::transmute::<&Self, &IDataObject>(self)
+        };
+        
+        match safe_get_data(data_obj, &format_etc) {
+            Ok(Some(medium)) => {
+                let res = unsafe {
+                    let mut medium = medium;
+                    if medium.tymed == TYMED_ISTREAM.0 as u32 {
+                        let stream = medium.u.pstm.as_ref().cloned();
+                        if let Some(stream) = stream {
+                            // IDataObject streams need to be rewound
+                            stream.Seek(0, STREAM_SEEK_SET, None)?;
+                            read_stream_fully(&stream)
+                        } else {
+                            Ok(Vec::new())
+                        }
+                    } else if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+                        let size = GlobalSize(medium.u.hGlobal);
+                        let data = GlobalLock(medium.u.hGlobal);
+
+                        let v = slice::from_raw_parts(data as *const u8, size);
+                        let res: Vec<u8> = v.into();
+
+                        GlobalUnlock(medium.u.hGlobal).ok();
+
+                        Ok(res)
+                    } else {
+                        Err(DATA_E_FORMATETC.into())
+                    };
+                    ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                    res
+                };
+                match res {
+                    Ok(data) => Ok(Some(data)),
+                    Err(e) => Err(NativeExtensionsError::from(e)),
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     fn get_stream(&self, format: u32) -> windows::core::Result<IStream> {
         let format = make_format_with_tymed(format, TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0));
         let res = unsafe {
@@ -788,10 +836,6 @@ pub trait GetData {
         let format = make_format_with_tymed(format, TYMED_HGLOBAL);
         self.has_data_for_format(&format)
     }
-}
-
-pub trait DataObjectExt {
-    fn performed_drop_effect(&self) -> Option<DROPEFFECT>;
 }
 
 impl GetData for IDataObject {
@@ -826,6 +870,49 @@ impl GetData for IDataObject {
             }
         }
         res
+    }
+
+    /// Safe wrapper for get_data that handles DV_E_FORMATETC gracefully
+    fn get_data_safe(&self, format: u32) -> NativeExtensionsResult<Option<Vec<u8>>> {
+        let format_etc = make_format_with_tymed(format, TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0));
+        
+        match safe_get_data(self, &format_etc) {
+            Ok(Some(medium)) => {
+                let res = unsafe {
+                    let mut medium = medium;
+                    if medium.tymed == TYMED_ISTREAM.0 as u32 {
+                        let stream = medium.u.pstm.as_ref().cloned();
+                        if let Some(stream) = stream {
+                            // IDataObject streams need to be rewound
+                            stream.Seek(0, STREAM_SEEK_SET, None)?;
+                            read_stream_fully(&stream)
+                        } else {
+                            Ok(Vec::new())
+                        }
+                    } else if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+                        let size = GlobalSize(medium.u.hGlobal);
+                        let data = GlobalLock(medium.u.hGlobal);
+
+                        let v = slice::from_raw_parts(data as *const u8, size);
+                        let res: Vec<u8> = v.into();
+
+                        GlobalUnlock(medium.u.hGlobal).ok();
+
+                        Ok(res)
+                    } else {
+                        Err(DATA_E_FORMATETC.into())
+                    };
+                    ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                    res
+                };
+                match res {
+                    Ok(data) => Ok(Some(data)),
+                    Err(e) => Err(NativeExtensionsError::from(e)),
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -871,4 +958,8 @@ where
 
         None
     }
+}
+
+pub trait DataObjectExt {
+    fn performed_drop_effect(&self) -> Option<DROPEFFECT>;
 }

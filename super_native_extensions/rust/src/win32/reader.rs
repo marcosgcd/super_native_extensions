@@ -60,7 +60,7 @@ use super::{
     common::{
         copy_stream_to_file, extract_formats, format_from_string, format_to_string,
         read_stream_fully, is_outlook_email_drag, enumerate_formats_safely,
-        query_format_with_fallback_safe,
+        query_format_with_fallback_safe, safe_get_data,
     },
     data_object::{DataObject, GetData},
     image_conversion::convert_to_png,
@@ -138,15 +138,13 @@ impl PlatformDataReader {
                             .collect()
                     }
                     Err(e) => {
-                        log::error!("Format enumeration failed in data_object_formats_raw: {}", e);
-                        log::warn!("Format enumeration failed: {}, checking if this is an Outlook drag", e);
+                        log::debug!("Format enumeration failed: {}, checking if this is an Outlook drag", e);
                         if is_outlook_email_drag(&self.data_object) {
-                            log::info!("Detected Outlook email drag operation");
-                            // For Outlook drags, we'll return an empty format list and let other methods handle it
+                            log::debug!("Detected Outlook email drag operation, returning empty format list");
                             vec![]
                         } else {
-                            log::error!("Not an Outlook drag, propagating error");
-                            return Err(e.into());
+                            log::debug!("Not an Outlook drag, returning empty format list");
+                            vec![]
                         }
                     }
                 };
@@ -286,41 +284,31 @@ impl PlatformDataReader {
         let formats = self.data_object_formats()?;
         // prefer DIBV5 with alpha channel
         let data = if formats.contains(&(CF_DIBV5.0 as u32)) {
-            match self.data_object.get_data(CF_DIBV5.0 as u32) {
-                Ok(data) => Ok(data),
+            match self.data_object.get_data_safe(CF_DIBV5.0 as u32) {
+                Ok(Some(data)) => Ok(data),
+                Ok(None) => {
+                    log::debug!("DIBV5 format not available");
+                    Err(NativeExtensionsError::OtherError(
+                        "DIBV5 format not available".into(),
+                    ))
+                }
                 Err(e) => {
                     log::warn!("Failed to get DIBV5 data: {}", e);
-                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
-                    if let Some(code) = e.hresult() {
-                        if code.0 == 0x80040064 && is_outlook_email_drag(&self.data_object) {
-                            log::debug!("DV_E_FORMATETC in generate_png DIBV5, skipping for Outlook drag");
-                            return Err(NativeExtensionsError::OtherError(
-                                "PNG generation not supported for Outlook drag".into(),
-                            ));
-                        }
-                    }
-                    Err(NativeExtensionsError::OtherError(
-                        format!("Failed to get DIBV5 data: {}", e)
-                    ))
+                    Err(e)
                 }
             }
         } else if formats.contains(&(CF_DIB.0 as u32)) {
-            match self.data_object.get_data(CF_DIB.0 as u32) {
-                Ok(data) => Ok(data),
+            match self.data_object.get_data_safe(CF_DIB.0 as u32) {
+                Ok(Some(data)) => Ok(data),
+                Ok(None) => {
+                    log::debug!("DIB format not available");
+                    Err(NativeExtensionsError::OtherError(
+                        "DIB format not available".into(),
+                    ))
+                }
                 Err(e) => {
                     log::warn!("Failed to get DIB data: {}", e);
-                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
-                    if let Some(code) = e.hresult() {
-                        if code.0 == 0x80040064 && is_outlook_email_drag(&self.data_object) {
-                            log::debug!("DV_E_FORMATETC in generate_png DIB, skipping for Outlook drag");
-                            return Err(NativeExtensionsError::OtherError(
-                                "PNG generation not supported for Outlook drag".into(),
-                            ));
-                        }
-                    }
-                    Err(NativeExtensionsError::OtherError(
-                        format!("Failed to get DIB data: {}", e)
-                    ))
+                    Err(e)
                 }
             }
         } else {
@@ -376,9 +364,9 @@ impl PlatformDataReader {
         } else {
             let formats = self.data_object_formats()?;
             if formats.contains(&format) {
-                match self.data_object.get_data(format) {
-                    Ok(mut data) => {
-                        // CF_UNICODETEXT text may be null terminated - in which case trucate
+                match self.data_object.get_data_safe(format) {
+                    Ok(Some(mut data)) => {
+                        // CF_UNICODETEXT text may be null terminated - in which case truncate
                         // the text before sending it to Dart.
                         if format == CF_UNICODETEXT.0 as u32 {
                             let terminator = data.chunks(2).position(|c| c == [0; 2]);
@@ -388,16 +376,15 @@ impl PlatformDataReader {
                         }
                         Ok(data.into())
                     }
-                    Err(e) => {
-                        log::warn!("Failed to get data for format {}: {}", format, e);
-                        if is_outlook_email_drag(&self.data_object) {
-                            log::info!("Outlook drag detected, returning null for format {}", format);
-                            Ok(Value::Null)
-                        } else {
-                            log::error!("Not an Outlook drag, propagating error for format {}", format);
-                            Err(e.into())
-                        }
+                    Ok(None) => {
+                        log::debug!("Format {} not available", format);
+                        Ok(Value::Null)
                     }
+                    Err(e) => {
+                        log::debug!("Failed to get data for format {}: {}", format, e);
+                        Ok(Value::Null)
+                    }
+                }
                 }
             } else {
                 // possibly virtual
@@ -440,10 +427,20 @@ impl PlatformDataReader {
     {
         if self.hdrop.borrow().is_none() {
             let files = if self.data_object.has_data(CF_HDROP.0 as u32) {
-                let data = self.data_object.get_data(CF_HDROP.0 as u32)?;
-                let files = Self::extract_drop_files(&data)?;
-
-                Some(files)
+                match self.data_object.get_data_safe(CF_HDROP.0 as u32) {
+                    Ok(Some(data)) => {
+                        let files = Self::extract_drop_files(&data)?;
+                        Some(files)
+                    }
+                    Ok(None) => {
+                        log::debug!("HDROP format not available");
+                        None
+                    }
+                    Err(e) => {
+                        log::debug!("Failed to get HDROP data: {}", e);
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -471,8 +468,17 @@ impl PlatformDataReader {
         if self.file_descriptors.borrow().is_none() {
             let format = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) };
             let descriptors = if self.data_object.has_data(format) {
-                let data = self.data_object.get_data(format)?;
-                Some(Self::extract_file_descriptors(data)?)
+                match self.data_object.get_data_safe(format) {
+                    Ok(Some(data)) => Some(Self::extract_file_descriptors(data)?),
+                    Ok(None) => {
+                        log::debug!("File descriptor format not available");
+                        None
+                    }
+                    Err(e) => {
+                        log::debug!("Failed to get file descriptor data: {}", e);
+                        None
+                    }
+                }
             } else {
                 None
             };
