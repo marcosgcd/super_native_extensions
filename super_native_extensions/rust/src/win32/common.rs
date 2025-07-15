@@ -74,7 +74,7 @@ pub fn make_format_with_tymed_index(format: u32, tymed: TYMED, index: i32) -> FO
 
 impl From<windows::core::Error> for NativeExtensionsError {
     fn from(error: windows::core::Error) -> Self {
-        NativeExtensionsError::OtherError(format!("Windows Error: {error}"))
+        NativeExtensionsError::WindowsError(error.code(), format!("Windows Error: {error}"))
     }
 }
 

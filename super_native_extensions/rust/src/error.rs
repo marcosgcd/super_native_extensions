@@ -21,6 +21,8 @@ pub enum NativeExtensionsError {
     PlatformMenuNotFound,
     InvalidMenuElement,
     InvalidMenuConfigurationId,
+    #[cfg(windows)]
+    WindowsError(windows::core::HRESULT, String),
 }
 
 pub type NativeExtensionsResult<T> = Result<T, NativeExtensionsError>;
@@ -55,6 +57,8 @@ impl Display for NativeExtensionsError {
             NativeExtensionsError::InvalidMenuConfigurationId => {
                 write!(f, "invalid menu configuration id")
             }
+            #[cfg(windows)]
+            NativeExtensionsError::WindowsError(_, msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -85,6 +89,16 @@ impl NativeExtensionsError {
             NativeExtensionsError::InvalidMenuConfigurationId => {
                 "invalidMenuConfigurationId".into()
             }
+            #[cfg(windows)]
+            NativeExtensionsError::WindowsError(_, _) => "windowsError".into(),
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn hresult(&self) -> Option<windows::core::HRESULT> {
+        match self {
+            NativeExtensionsError::WindowsError(hresult, _) => Some(*hresult),
+            _ => None,
         }
     }
 }

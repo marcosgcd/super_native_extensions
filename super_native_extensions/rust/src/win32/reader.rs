@@ -286,9 +286,25 @@ impl PlatformDataReader {
         let formats = self.data_object_formats()?;
         // prefer DIBV5 with alpha channel
         let data = if formats.contains(&(CF_DIBV5.0 as u32)) {
-            Ok(self.data_object.get_data(CF_DIBV5.0 as u32)?)
+            match self.data_object.get_data(CF_DIBV5.0 as u32) {
+                Ok(data) => Ok(data),
+                Err(e) => {
+                    log::warn!("Failed to get DIBV5 data: {}", e);
+                    Err(NativeExtensionsError::OtherError(
+                        format!("Failed to get DIBV5 data: {}", e)
+                    ))
+                }
+            }
         } else if formats.contains(&(CF_DIB.0 as u32)) {
-            Ok(self.data_object.get_data(CF_DIB.0 as u32)?)
+            match self.data_object.get_data(CF_DIB.0 as u32) {
+                Ok(data) => Ok(data),
+                Err(e) => {
+                    log::warn!("Failed to get DIB data: {}", e);
+                    Err(NativeExtensionsError::OtherError(
+                        format!("Failed to get DIB data: {}", e)
+                    ))
+                }
+            }
         } else {
             Err(NativeExtensionsError::OtherError(
                 "No DIB or DIBV5 data found in data object".into(),
@@ -342,16 +358,29 @@ impl PlatformDataReader {
         } else {
             let formats = self.data_object_formats()?;
             if formats.contains(&format) {
-                let mut data = self.data_object.get_data(format)?;
-                // CF_UNICODETEXT text may be null terminated - in which case trucate
-                // the text before sending it to Dart.
-                if format == CF_UNICODETEXT.0 as u32 {
-                    let terminator = data.chunks(2).position(|c| c == [0; 2]);
-                    if let Some(terminator) = terminator {
-                        data.truncate(terminator * 2);
+                match self.data_object.get_data(format) {
+                    Ok(mut data) => {
+                        // CF_UNICODETEXT text may be null terminated - in which case trucate
+                        // the text before sending it to Dart.
+                        if format == CF_UNICODETEXT.0 as u32 {
+                            let terminator = data.chunks(2).position(|c| c == [0; 2]);
+                            if let Some(terminator) = terminator {
+                                data.truncate(terminator * 2);
+                            }
+                        }
+                        Ok(data.into())
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to get data for format {}: {}", format, e);
+                        if is_outlook_email_drag(&self.data_object) {
+                            log::info!("Outlook drag detected, returning null for format {}", format);
+                            Ok(Value::Null)
+                        } else {
+                            log::error!("Not an Outlook drag, propagating error for format {}", format);
+                            Err(e.into())
+                        }
                     }
                 }
-                Ok(data.into())
             } else {
                 // possibly virtual
                 Ok(Value::Null)
