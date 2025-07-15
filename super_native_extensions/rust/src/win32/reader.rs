@@ -739,8 +739,10 @@ impl PlatformDataReader {
         if self.data_object.has_data_for_format(&format) {
             unsafe {
                 let medium = DataObject::with_local_request(|| {
-                    self.data_object.GetData(&format as *const _)
-                })?;
+                    safe_get_data(&self.data_object, &format)
+                })?.ok_or_else(|| NativeExtensionsError::VirtualFileReceiveError(
+                    "item not found".into(),
+                ))?;
                 Ok(medium)
             }
         } else {
