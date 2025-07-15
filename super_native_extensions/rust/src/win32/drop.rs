@@ -418,7 +418,6 @@ impl PlatformDropContext {
                 Ok(event) => event,
                 Err(e) => {
                     log::debug!("Failed to create event for session: {}", e);
-                    // Create a minimal event with empty items for graceful handling
                     crate::drop_manager::DropEvent {
                         session_id: session.id,
                         location_in_view: crate::api_model::Point { x: 0.0, y: 0.0 },
@@ -429,6 +428,17 @@ impl PlatformDropContext {
                     }
                 }
             };
+
+            // Ensure safe_get_data is used for IDataObject calls
+            if let Some(data_object) = _pdataobj {
+                let format = FORMATETC { /* populate format */ };
+                match safe_get_data(data_object, &format) {
+                    Ok(Some(_)) => log::debug!("Data retrieved successfully"),
+                    Ok(None) => log::debug!("Format not available"),
+                    Err(e) => log::debug!("Error retrieving data: {}", e),
+                }
+            }
+
             let done = Rc::new(Cell::new(false));
             let done_clone = done.clone();
             self.delegate()?.send_perform_drop(
@@ -439,6 +449,7 @@ impl PlatformDropContext {
                     done_clone.set(true);
                 }),
             );
+
             let data_object_async = session.data_object.cast::<IDataObjectAsyncCapability>();
             if let Ok(data_object_async) = data_object_async {
                 if let Ok(res) = unsafe { data_object_async.GetAsyncMode() } {
