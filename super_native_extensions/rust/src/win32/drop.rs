@@ -425,13 +425,36 @@ impl PlatformDropContext {
         let session = self.current_session.borrow().as_ref().cloned();
         if let Some(session) = session {
             *effect = session.last_operation.get().to_platform();
-            let event = self.event_for_session(
+            let event = match self.event_for_session(
                 &session,
                 pt,
                 grfkeystate,
                 *effect,
                 Some(session.last_operation.get()),
-            )?;
+            ) {
+                Ok(event) => event,
+                Err(e) => {
+                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
+                    if let Some(code) = e.hresult() {
+                        if code.0 == 0x80040064 {
+                            log::debug!("DV_E_FORMATETC in on_drop event_for_session, creating empty event for Outlook drag");
+                            // Create a minimal event with empty items for Outlook drags
+                            crate::drop_manager::DropEvent {
+                                session_id: session.id,
+                                location_in_view: crate::api_model::Point { x: 0.0, y: 0.0 },
+                                allowed_operations: crate::api_model::DropOperation::from_platform_mask(*effect),
+                                accepted_operation: Some(session.last_operation.get()),
+                                items: Vec::new(),
+                                reader: Some(session.registered_reader.clone()),
+                            }
+                        } else {
+                            return Err(e);
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
             let done = Rc::new(Cell::new(false));
             let done_clone = done.clone();
             self.delegate()?.send_perform_drop(
@@ -524,9 +547,21 @@ impl IDropTarget_Impl for DropTarget {
             }
         }
         if let Some(context) = self.platform_context.upgrade() {
-            context
-                .on_drag_enter(pdataobj, grfkeystate, pt, pdweffect)
-                .ok_log();
+            match context.on_drag_enter(pdataobj, grfkeystate, pt, pdweffect) {
+                Ok(_) => {}
+                Err(e) => {
+                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
+                    if let Some(code) = e.hresult() {
+                        if code.0 == 0x80040064 {
+                            log::debug!("DV_E_FORMATETC in DragEnter, ignoring for Outlook drag");
+                        } else {
+                            log::warn!("Error in on_drag_enter: {}", e);
+                        }
+                    } else {
+                        log::warn!("Error in on_drag_enter: {}", e);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -545,7 +580,21 @@ impl IDropTarget_Impl for DropTarget {
             }
         }
         if let Some(context) = self.platform_context.upgrade() {
-            context.on_drag_over(grfkeystate, pt, pdweffect).ok_log();
+            match context.on_drag_over(grfkeystate, pt, pdweffect) {
+                Ok(_) => {}
+                Err(e) => {
+                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
+                    if let Some(code) = e.hresult() {
+                        if code.0 == 0x80040064 {
+                            log::debug!("DV_E_FORMATETC in DragOver, ignoring for Outlook drag");
+                        } else {
+                            log::warn!("Error in on_drag_over: {}", e);
+                        }
+                    } else {
+                        log::warn!("Error in on_drag_over: {}", e);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -557,7 +606,21 @@ impl IDropTarget_Impl for DropTarget {
             }
         }
         if let Some(context) = self.platform_context.upgrade() {
-            context.on_drag_leave().ok_log();
+            match context.on_drag_leave() {
+                Ok(_) => {}
+                Err(e) => {
+                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
+                    if let Some(code) = e.hresult() {
+                        if code.0 == 0x80040064 {
+                            log::debug!("DV_E_FORMATETC in DragLeave, ignoring for Outlook drag");
+                        } else {
+                            log::warn!("Error in on_drag_leave: {}", e);
+                        }
+                    } else {
+                        log::warn!("Error in on_drag_leave: {}", e);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -581,9 +644,21 @@ impl IDropTarget_Impl for DropTarget {
             }
         }
         if let Some(context) = self.platform_context.upgrade() {
-            context
-                .on_drop(pdataobj, grfkeystate, pt, pdweffect)
-                .ok_log();
+            match context.on_drop(pdataobj, grfkeystate, pt, pdweffect) {
+                Ok(_) => {}
+                Err(e) => {
+                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
+                    if let Some(code) = e.hresult() {
+                        if code.0 == 0x80040064 {
+                            log::debug!("DV_E_FORMATETC in Drop, ignoring for Outlook drag");
+                        } else {
+                            log::warn!("Error in on_drop: {}", e);
+                        }
+                    } else {
+                        log::warn!("Error in on_drop: {}", e);
+                    }
+                }
+            }
         }
         Ok(())
     }

@@ -290,6 +290,15 @@ impl PlatformDataReader {
                 Ok(data) => Ok(data),
                 Err(e) => {
                     log::warn!("Failed to get DIBV5 data: {}", e);
+                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
+                    if let Some(code) = e.hresult() {
+                        if code.0 == 0x80040064 && is_outlook_email_drag(&self.data_object) {
+                            log::debug!("DV_E_FORMATETC in generate_png DIBV5, skipping for Outlook drag");
+                            return Err(NativeExtensionsError::OtherError(
+                                "PNG generation not supported for Outlook drag".into(),
+                            ));
+                        }
+                    }
                     Err(NativeExtensionsError::OtherError(
                         format!("Failed to get DIBV5 data: {}", e)
                     ))
@@ -300,6 +309,15 @@ impl PlatformDataReader {
                 Ok(data) => Ok(data),
                 Err(e) => {
                     log::warn!("Failed to get DIB data: {}", e);
+                    // Handle DV_E_FORMATETC (0x80040064) from Outlook drags
+                    if let Some(code) = e.hresult() {
+                        if code.0 == 0x80040064 && is_outlook_email_drag(&self.data_object) {
+                            log::debug!("DV_E_FORMATETC in generate_png DIB, skipping for Outlook drag");
+                            return Err(NativeExtensionsError::OtherError(
+                                "PNG generation not supported for Outlook drag".into(),
+                            ));
+                        }
+                    }
                     Err(NativeExtensionsError::OtherError(
                         format!("Failed to get DIB data: {}", e)
                     ))
