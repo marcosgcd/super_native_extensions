@@ -60,6 +60,7 @@ use super::{
     common::{
         copy_stream_to_file, extract_formats, format_from_string, format_to_string,
         read_stream_fully, is_outlook_email_drag, enumerate_formats_safely,
+        query_format_with_fallback_safe,
     },
     data_object::{DataObject, GetData},
     image_conversion::convert_to_png,
@@ -114,32 +115,42 @@ impl PlatformDataReader {
     fn data_object_formats_raw(&self) -> NativeExtensionsResult<Vec<u32>> {
         let formats = self.formats_raw.clone().take();
         match formats {
-            Some(formats) => Ok(formats),
+            Some(formats) => {
+                log::debug!("Using cached formats: {} formats", formats.len());
+                Ok(formats)
+            }
             None => {
+                log::info!("Enumerating formats for first time");
                 let formats: Vec<u32> = match enumerate_formats_safely(&self.data_object) {
-                    Ok(formatetc_vec) => formatetc_vec
-                        .iter()
-                        .filter_map(|f| {
-                            if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
-                                || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
-                            {
-                                Some(f.cfFormat as u32)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect(),
+                    Ok(formatetc_vec) => {
+                        log::info!("Format enumeration succeeded, got {} formats", formatetc_vec.len());
+                        formatetc_vec
+                            .iter()
+                            .filter_map(|f| {
+                                if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
+                                    || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
+                                {
+                                    Some(f.cfFormat as u32)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    }
                     Err(e) => {
+                        log::error!("Format enumeration failed in data_object_formats_raw: {}", e);
                         log::warn!("Format enumeration failed: {}, checking if this is an Outlook drag", e);
                         if is_outlook_email_drag(&self.data_object) {
                             log::info!("Detected Outlook email drag operation");
                             // For Outlook drags, we'll return an empty format list and let other methods handle it
                             vec![]
                         } else {
+                            log::error!("Not an Outlook drag, propagating error");
                             return Err(e.into());
                         }
                     }
                 };
+                log::info!("Final format count: {}", formats.len());
                 self.formats_raw.replace(Some(formats.clone()));
                 Ok(formats)
             }

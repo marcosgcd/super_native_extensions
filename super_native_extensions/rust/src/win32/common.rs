@@ -87,16 +87,64 @@ pub unsafe fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 
 /// Check if this is an Outlook email drag operation
 pub fn is_outlook_email_drag(data_object: &IDataObject) -> bool {
+    log::debug!("Checking if this is an Outlook email drag operation");
+    
     // Check for Outlook-specific formats
-    if let (Ok(msg_fmt), Ok(desc_fmt)) = (
-        unsafe { RegisterClipboardFormatA(CF_OUTLOOK_MSG.as_ptr() as _) },
-        unsafe { RegisterClipboardFormatA(CF_FILEDESCRIPTOR.as_ptr() as _) },
-    ) {
-        query_format_with_fallback(data_object, msg_fmt) || 
-        query_format_with_fallback(data_object, desc_fmt)
-    } else {
-        false
+    let msg_fmt = match unsafe { RegisterClipboardFormatA(CF_OUTLOOK_MSG.as_ptr() as _) } {
+        Ok(fmt) => fmt,
+        Err(_) => {
+            log::warn!("Failed to register CF_OUTLOOK_MSG format");
+            return false;
+        }
+    };
+    
+    let desc_fmt = match unsafe { RegisterClipboardFormatA(CF_FILEDESCRIPTOR.as_ptr() as _) } {
+        Ok(fmt) => fmt,
+        Err(_) => {
+            log::warn!("Failed to register CF_FILEDESCRIPTOR format");
+            return false;
+        }
+    };
+    
+    let result = query_format_with_fallback_safe(data_object, msg_fmt) || 
+                 query_format_with_fallback_safe(data_object, desc_fmt);
+    
+    log::debug!("Outlook email drag check result: {}", result);
+    result
+}
+
+/// Safe version of query_format_with_fallback that doesn't propagate errors
+pub fn query_format_with_fallback_safe(data_object: &IDataObject, format: u32) -> bool {
+    let tymed_options = [
+        TYMED_HGLOBAL,
+        TYMED_ISTREAM,
+        TYMED_ISTORAGE,
+        TYMED_FILE,
+    ];
+    
+    for tymed in tymed_options {
+        let formatetc = FORMATETC {
+            cfFormat: format as u16,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: tymed.0,
+        };
+        
+        match unsafe { data_object.QueryGetData(&formatetc) } {
+            Ok(_) => {
+                log::debug!("Format {} available with TYMED {}", format, tymed.0);
+                return true;
+            }
+            Err(e) => {
+                log::debug!("Format {} not available with TYMED {}: {}", format, tymed.0, e);
+                // Continue to try other TYMED values
+            }
+        }
     }
+    
+    log::debug!("Format {} not available with any TYMED", format);
+    false
 }
 
 /// Query format with multiple TYMED values as fallback
@@ -126,6 +174,7 @@ pub fn query_format_with_fallback(data_object: &IDataObject, format: u32) -> boo
 
 /// Try common Outlook formats when enumeration fails
 pub fn try_common_outlook_formats(data_object: &IDataObject) -> Vec<FORMATETC> {
+    log::info!("Trying common Outlook formats as fallback");
     let mut formats = Vec::new();
     
     // Common Outlook formats to try
@@ -141,32 +190,49 @@ pub fn try_common_outlook_formats(data_object: &IDataObject) -> Vec<FORMATETC> {
     ];
     
     for format_name in outlook_formats {
-        if let Ok(format_id) = unsafe { RegisterClipboardFormatA(format_name.as_ptr() as _) } {
-            // Try different TYMED values for each format
-            let tymed_options = [
-                TYMED_HGLOBAL,
-                TYMED_ISTREAM,
-                TYMED_ISTORAGE,
-                TYMED_FILE,
-            ];
-            
-            for tymed in tymed_options {
-                let formatetc = FORMATETC {
-                    cfFormat: format_id as u16,
-                    ptd: std::ptr::null_mut(),
-                    dwAspect: DVASPECT_CONTENT.0,
-                    lindex: -1,
-                    tymed: tymed.0,
-                };
+        let format_name_str = std::str::from_utf8(format_name).unwrap_or("unknown");
+        
+        match unsafe { RegisterClipboardFormatA(format_name.as_ptr() as _) } {
+            Ok(format_id) => {
+                log::debug!("Registered format '{}' with ID {}", format_name_str, format_id);
                 
-                if unsafe { data_object.QueryGetData(&formatetc) }.is_ok() {
-                    formats.push(formatetc);
-                    break; // Found a working TYMED for this format
+                // Try different TYMED values for each format
+                let tymed_options = [
+                    TYMED_HGLOBAL,
+                    TYMED_ISTREAM,
+                    TYMED_ISTORAGE,
+                    TYMED_FILE,
+                ];
+                
+                for tymed in tymed_options {
+                    let formatetc = FORMATETC {
+                        cfFormat: format_id as u16,
+                        ptd: std::ptr::null_mut(),
+                        dwAspect: DVASPECT_CONTENT.0,
+                        lindex: -1,
+                        tymed: tymed.0,
+                    };
+                    
+                    match unsafe { data_object.QueryGetData(&formatetc) } {
+                        Ok(_) => {
+                            log::info!("Found working format '{}' with TYMED {}", format_name_str, tymed.0);
+                            formats.push(formatetc);
+                            break; // Found a working TYMED for this format
+                        }
+                        Err(e) => {
+                            log::debug!("Format '{}' not available with TYMED {}: {}", format_name_str, tymed.0, e);
+                            // Continue to try other TYMED values
+                        }
+                    }
                 }
+            }
+            Err(e) => {
+                log::warn!("Failed to register format '{}': {}", format_name_str, e);
             }
         }
     }
     
+    log::info!("Found {} working Outlook formats", formats.len());
     formats
 }
 
@@ -207,11 +273,14 @@ pub fn log_outlook_format_detection(data_object: &IDataObject) {
     ];
     
     for (name, format_bytes) in test_formats {
-        if let Ok(format_id) = unsafe { RegisterClipboardFormatA(format_bytes.as_ptr() as _) } {
-            let available = query_format_with_fallback(data_object, format_id);
-            log::info!("Format '{}' (ID: {}): {}", name, format_id, if available { "Available" } else { "Not available" });
-        } else {
-            log::warn!("Failed to register format: {}", name);
+        match unsafe { RegisterClipboardFormatA(format_bytes.as_ptr() as _) } {
+            Ok(format_id) => {
+                let available = query_format_with_fallback_safe(data_object, format_id);
+                log::info!("Format '{}' (ID: {}): {}", name, format_id, if available { "Available" } else { "Not available" });
+            }
+            Err(e) => {
+                log::warn!("Failed to register format '{}': {}", name, e);
+            }
         }
     }
 }
