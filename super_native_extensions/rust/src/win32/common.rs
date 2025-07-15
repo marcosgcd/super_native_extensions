@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use windows::{
     core::{s, ComInterface, GUID, HRESULT, HSTRING},
     Win32::{
-        Foundation::{E_UNEXPECTED, HANDLE, HWND, S_OK},
+        Foundation::{E_UNEXPECTED, HANDLE, HWND, S_OK, DV_E_FORMATETC},
         Graphics::Gdi::{
             CreateDIBSection, GetDC, GetDeviceCaps, MonitorFromWindow, ReleaseDC, BITMAPINFO,
             BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HMONITOR, LOGPIXELSX,
@@ -13,9 +13,9 @@ use windows::{
         System::{
             Com::{
                 CoCreateInstance, IDataObject, IStream, CLSCTX_ALL, DATADIR_GET, DVASPECT_CONTENT,
-                FORMATETC, TYMED,
+                FORMATETC, TYMED, TYMED_HGLOBAL, TYMED_ISTREAM, TYMED_ISTORAGE, TYMED_FILE,
             },
-            DataExchange::{GetClipboardFormatNameW, RegisterClipboardFormatW},
+            DataExchange::{GetClipboardFormatNameW, RegisterClipboardFormatW, RegisterClipboardFormatA},
             LibraryLoader::{GetProcAddress, LoadLibraryA},
         },
         UI::HiDpi::{MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE},
@@ -25,9 +25,20 @@ use windows::{
 use crate::{
     api_model::ImageData,
     error::{NativeExtensionsError, NativeExtensionsResult},
+    log::OkLog,
 };
 
 const INTERNAL_PREFIX: &str = "NativeShell_CF_";
+
+// Outlook-specific clipboard format constants
+const CF_OUTLOOK_MSG: &[u8] = b"RenPrivateMessages\0";
+const CF_OUTLOOK_ATTACH: &[u8] = b"RenPrivateAttachments\0";
+const CF_FILEDESCRIPTOR: &[u8] = b"FileGroupDescriptor\0";
+const CF_FILECONTENTS: &[u8] = b"FileContents\0";
+const CF_UNIFORMRESOURCELOCATOR: &[u8] = b"UniformResourceLocator\0";
+const CF_HDROP_STR: &[u8] = b"CF_HDROP\0";
+const CF_TEXT_STR: &[u8] = b"CF_TEXT\0";
+const CF_UNICODETEXT_STR: &[u8] = b"CF_UNICODETEXT\0";
 
 pub fn format_to_string(format: u32) -> String {
     let mut buf: [_; 1024] = [0u16; 1024];
@@ -74,18 +85,156 @@ pub unsafe fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
     ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
 }
 
-pub fn extract_formats(object: &IDataObject) -> windows::core::Result<Vec<FORMATETC>> {
-    let e = unsafe { object.EnumFormatEtc(DATADIR_GET.0 as u32)? };
-    let mut res = Vec::new();
-    loop {
-        let mut format = [FORMATETC::default()];
-        let mut fetched = 0u32;
-        if unsafe { e.Next(&mut format, Some(&mut fetched as *mut _)) }.is_err() || fetched == 0 {
-            break;
-        }
-        res.push(format[0]);
+/// Check if this is an Outlook email drag operation
+pub fn is_outlook_email_drag(data_object: &IDataObject) -> bool {
+    // Check for Outlook-specific formats
+    if let (Ok(msg_fmt), Ok(desc_fmt)) = (
+        unsafe { RegisterClipboardFormatA(CF_OUTLOOK_MSG.as_ptr() as _) },
+        unsafe { RegisterClipboardFormatA(CF_FILEDESCRIPTOR.as_ptr() as _) },
+    ) {
+        query_format_with_fallback(data_object, msg_fmt) || 
+        query_format_with_fallback(data_object, desc_fmt)
+    } else {
+        false
     }
-    Ok(res)
+}
+
+/// Query format with multiple TYMED values as fallback
+pub fn query_format_with_fallback(data_object: &IDataObject, format: u32) -> bool {
+    let tymed_options = [
+        TYMED_HGLOBAL,
+        TYMED_ISTREAM,
+        TYMED_ISTORAGE,
+        TYMED_FILE,
+    ];
+    
+    for tymed in tymed_options {
+        let formatetc = FORMATETC {
+            cfFormat: format as u16,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: tymed.0,
+        };
+        
+        if unsafe { data_object.QueryGetData(&formatetc) }.is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Try common Outlook formats when enumeration fails
+pub fn try_common_outlook_formats(data_object: &IDataObject) -> Vec<FORMATETC> {
+    let mut formats = Vec::new();
+    
+    // Common Outlook formats to try
+    let outlook_formats = [
+        CF_OUTLOOK_MSG,
+        CF_OUTLOOK_ATTACH,
+        CF_FILEDESCRIPTOR,
+        CF_FILECONTENTS,
+        CF_UNIFORMRESOURCELOCATOR,
+        CF_HDROP_STR,
+        CF_TEXT_STR,
+        CF_UNICODETEXT_STR,
+    ];
+    
+    for format_name in outlook_formats {
+        if let Ok(format_id) = unsafe { RegisterClipboardFormatA(format_name.as_ptr() as _) } {
+            // Try different TYMED values for each format
+            let tymed_options = [
+                TYMED_HGLOBAL,
+                TYMED_ISTREAM,
+                TYMED_ISTORAGE,
+                TYMED_FILE,
+            ];
+            
+            for tymed in tymed_options {
+                let formatetc = FORMATETC {
+                    cfFormat: format_id as u16,
+                    ptd: std::ptr::null_mut(),
+                    dwAspect: DVASPECT_CONTENT.0,
+                    lindex: -1,
+                    tymed: tymed.0,
+                };
+                
+                if unsafe { data_object.QueryGetData(&formatetc) }.is_ok() {
+                    formats.push(formatetc);
+                    break; // Found a working TYMED for this format
+                }
+            }
+        }
+    }
+    
+    formats
+}
+
+/// Safely enumerate formats with fallback for Outlook
+pub fn enumerate_formats_safely(data_object: &IDataObject) -> windows::core::Result<Vec<FORMATETC>> {
+    match unsafe { data_object.EnumFormatEtc(DATADIR_GET.0 as u32) } {
+        Ok(e) => {
+            let mut res = Vec::new();
+            loop {
+                let mut format = [FORMATETC::default()];
+                let mut fetched = 0u32;
+                if unsafe { e.Next(&mut format, Some(&mut fetched as *mut _)) }.is_err() || fetched == 0 {
+                    break;
+                }
+                res.push(format[0]);
+            }
+            Ok(res)
+        }
+        Err(e) if e.code() == DV_E_FORMATETC => {
+            // Log the error but continue with fallback formats
+            log::warn!("Format enumeration failed with DV_E_FORMATETC, using fallback formats: {}", e);
+            Ok(try_common_outlook_formats(data_object))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn log_outlook_format_detection(data_object: &IDataObject) {
+    log::info!("Checking for Outlook email drag operation...");
+    
+    // Test individual format availability
+    let test_formats = [
+        ("RenPrivateMessages", CF_OUTLOOK_MSG),
+        ("RenPrivateAttachments", CF_OUTLOOK_ATTACH),
+        ("FileGroupDescriptor", CF_FILEDESCRIPTOR),
+        ("FileContents", CF_FILECONTENTS),
+        ("UniformResourceLocator", CF_UNIFORMRESOURCELOCATOR),
+    ];
+    
+    for (name, format_bytes) in test_formats {
+        if let Ok(format_id) = unsafe { RegisterClipboardFormatA(format_bytes.as_ptr() as _) } {
+            let available = query_format_with_fallback(data_object, format_id);
+            log::info!("Format '{}' (ID: {}): {}", name, format_id, if available { "Available" } else { "Not available" });
+        } else {
+            log::warn!("Failed to register format: {}", name);
+        }
+    }
+}
+
+pub fn extract_formats(object: &IDataObject) -> windows::core::Result<Vec<FORMATETC>> {
+    log::info!("Attempting to extract formats from data object");
+    
+    let result = enumerate_formats_safely(object);
+    match &result {
+        Ok(formats) => {
+            log::info!("Successfully extracted {} formats", formats.len());
+            for (i, format) in formats.iter().enumerate() {
+                log::debug!("Format {}: cfFormat={}, tymed={}, lindex={}", 
+                    i, format.cfFormat, format.tymed, format.lindex);
+            }
+        }
+        Err(e) => {
+            log::warn!("Format extraction failed: {}", e);
+            log_outlook_format_detection(object);
+        }
+    }
+    
+    result
 }
 
 pub fn image_data_to_hbitmap(image: &ImageData) -> NativeExtensionsResult<HBITMAP> {

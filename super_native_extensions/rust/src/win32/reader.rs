@@ -59,7 +59,7 @@ use crate::{
 use super::{
     common::{
         copy_stream_to_file, extract_formats, format_from_string, format_to_string,
-        read_stream_fully,
+        read_stream_fully, is_outlook_email_drag, enumerate_formats_safely,
     },
     data_object::{DataObject, GetData},
     image_conversion::convert_to_png,
@@ -100,7 +100,13 @@ impl PlatformDataReader {
         } else if !self.data_object_formats()?.is_empty() {
             Ok(1)
         } else {
-            Ok(0)
+            // If no formats are available, check if this is an Outlook drag operation
+            if is_outlook_email_drag(&self.data_object) {
+                log::info!("Outlook email drag detected, returning 1 item");
+                Ok(1)
+            } else {
+                Ok(0)
+            }
         }
     }
 
@@ -110,18 +116,30 @@ impl PlatformDataReader {
         match formats {
             Some(formats) => Ok(formats),
             None => {
-                let formats: Vec<u32> = extract_formats(&self.data_object)?
-                    .iter()
-                    .filter_map(|f| {
-                        if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
-                            || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
-                        {
-                            Some(f.cfFormat as u32)
+                let formats: Vec<u32> = match enumerate_formats_safely(&self.data_object) {
+                    Ok(formatetc_vec) => formatetc_vec
+                        .iter()
+                        .filter_map(|f| {
+                            if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
+                                || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
+                            {
+                                Some(f.cfFormat as u32)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    Err(e) => {
+                        log::warn!("Format enumeration failed: {}, checking if this is an Outlook drag", e);
+                        if is_outlook_email_drag(&self.data_object) {
+                            log::info!("Detected Outlook email drag operation");
+                            // For Outlook drags, we'll return an empty format list and let other methods handle it
+                            vec![]
                         } else {
-                            None
+                            return Err(e.into());
                         }
-                    })
-                    .collect();
+                    }
+                };
                 self.formats_raw.replace(Some(formats.clone()));
                 Ok(formats)
             }
@@ -143,15 +161,50 @@ impl PlatformDataReader {
             let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
             res.push(png);
         }
+        
+        // If we don't have any formats and this is an Outlook drag, try to provide basic fallback formats
+        if res.is_empty() && is_outlook_email_drag(&self.data_object) {
+            log::info!("Outlook drag detected, providing fallback format IDs");
+            // Try to register common Outlook formats
+            if let Ok(msg_format) = unsafe { RegisterClipboardFormatW(&HSTRING::from("RenPrivateMessages")) } {
+                res.push(msg_format);
+            }
+            if let Ok(attach_format) = unsafe { RegisterClipboardFormatW(&HSTRING::from("RenPrivateAttachments")) } {
+                res.push(attach_format);
+            }
+            if let Ok(fd_format) = unsafe { RegisterClipboardFormatW(&HSTRING::from("FileGroupDescriptor")) } {
+                res.push(fd_format);
+            }
+            if let Ok(url_format) = unsafe { RegisterClipboardFormatW(&HSTRING::from("UniformResourceLocator")) } {
+                res.push(url_format);
+            }
+        }
+        
         Ok(res)
     }
 
     pub fn get_formats_for_item_sync(&self, item: i64) -> NativeExtensionsResult<Vec<String>> {
         let mut formats = if item == 0 {
-            self.data_object_formats()?
-                .iter()
-                .map(|f| format_to_string(*f))
-                .collect()
+            let data_formats = self.data_object_formats()?;
+            if data_formats.is_empty() && is_outlook_email_drag(&self.data_object) {
+                // For Outlook drag operations, provide common formats that might be available
+                log::info!("Outlook drag detected, providing fallback formats");
+                vec![
+                    "RenPrivateMessages".to_string(),
+                    "RenPrivateAttachments".to_string(),
+                    "FileGroupDescriptor".to_string(),
+                    "FileContents".to_string(),
+                    "UniformResourceLocator".to_string(),
+                    "CF_HDROP".to_string(),
+                    "CF_TEXT".to_string(),
+                    "CF_UNICODETEXT".to_string(),
+                ]
+            } else {
+                data_formats
+                    .iter()
+                    .map(|f| format_to_string(*f))
+                    .collect()
+            }
         } else if item > 0 {
             let hdrop_len = self.with_hdrop(|h| Ok(h.map(|f| f.len()).unwrap_or(0)))?;
             if item < hdrop_len as i64 {
