@@ -507,6 +507,16 @@ impl DropTarget {
             drop_target_helper: create_instance(&CLSID_DragDropHelper).ok_log(),
         }
     }
+
+    fn validate_formatetc(format: &FORMATETC) -> windows::core::Result<()> {
+        if format.tymed == 0 || format.cfFormat == 0 {
+            return Err(windows::core::Error::new(
+                windows::core::HRESULT(0x80040064), // Invalid FORMATETC structure
+                "Invalid FORMATETC structure",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[allow(non_snake_case)]
@@ -527,11 +537,19 @@ impl IDropTarget_Impl for DropTarget {
                         pt as *const POINTL as *const _,
                         *pdweffect,
                     )
-                    .ok(); // Logging the error here is pretty useless since we have
-                           // no control over either the data object or drop target helper.
+                    .ok();
             }
         }
+
         if let Some(context) = self.platform_context.upgrade() {
+            if let Some(data_object) = pdataobj {
+                let format = FORMATETC { /* populate format */ };
+                if let Err(e) = Self::validate_formatetc(&format) {
+                    log::debug!("Invalid FORMATETC structure: {}", e);
+                    return Err(e);
+                }
+            }
+
             match context.on_drag_enter(pdataobj, grfkeystate, pt, pdweffect) {
                 Ok(_) => {}
                 Err(e) => {
