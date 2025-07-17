@@ -89,14 +89,17 @@ pub fn extract_formats(object: &IDataObject) -> windows::core::Result<Vec<FORMAT
                 // Check if this is DV_E_FORMATETC (0x80040064) - invalid FORMATETC structure
                 if err.code().0 == 0x80040064u32 as i32 {
                     // This is a common error with some data objects, just break out of the loop
+                    log::debug!("EnumFormatEtc encountered DV_E_FORMATETC, ending enumeration");
                     break;
                 } else {
                     // For other errors, propagate them
+                    log::warn!("EnumFormatEtc failed with error: {:?}", err);
                     return Err(err);
                 }
             }
         }
     }
+    log::debug!("Extracted {} formats from data object", res.len());
     Ok(res)
 }
 
@@ -301,4 +304,40 @@ pub fn copy_stream_to_file(stream: &IStream, path: &Path) -> NativeExtensionsRes
     })?;
 
     res
+}
+
+/// Safe wrapper for IDataObject::GetData that checks format availability first
+pub fn safe_get_data(obj: &IDataObject, fmt: &FORMATETC) -> NativeExtensionsResult<Option<windows::Win32::System::Com::STGMEDIUM>> {
+    use windows::Win32::System::Com::STGMEDIUM;
+    
+    unsafe {
+        // Check availability first
+        if obj.QueryGetData(fmt).is_err() {
+            return Ok(None);
+        }
+        
+        // Only call GetData if format is supported
+        match obj.GetData(fmt) {
+            Ok(medium) => Ok(Some(medium)),
+            Err(e) if e.code().0 == 0x80040064u32 as i32 => {
+                // DV_E_FORMATETC - invalid FORMATETC structure
+                log::debug!("Format not available (DV_E_FORMATETC): {:?}", fmt);
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Safe wrapper for IDataObject::EnumFormatEtc with graceful error handling
+pub fn safe_enum_format_etc(object: &IDataObject) -> windows::core::Result<Vec<FORMATETC>> {
+    match extract_formats(object) {
+        Ok(formats) => Ok(formats),
+        Err(err) if err.code().0 == 0x80040064u32 as i32 => {
+            // DV_E_FORMATETC - return empty list instead of failing
+            log::debug!("EnumFormatEtc failed with DV_E_FORMATETC, returning empty format list");
+            Ok(Vec::new())
+        }
+        Err(err) => Err(err),
+    }
 }

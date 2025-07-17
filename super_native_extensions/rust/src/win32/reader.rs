@@ -110,7 +110,7 @@ impl PlatformDataReader {
         match formats {
             Some(formats) => Ok(formats),
             None => {
-                let formats: Vec<u32> = match extract_formats(&self.data_object) {
+                let formats: Vec<u32> = match crate::win32::common::safe_enum_format_etc(&self.data_object) {
                     Ok(formats) => formats
                         .iter()
                         .filter_map(|f| {
@@ -126,7 +126,7 @@ impl PlatformDataReader {
                     Err(err) => {
                         // If we can't extract formats, return empty list rather than failing
                         // This is common with some data objects that have corrupt format structures
-                        log::warn!("Failed to extract formats from data object: {}", err);
+                        log::debug!("Failed to extract formats from data object: {}", err);
                         Vec::new()
                     }
                 };
@@ -228,11 +228,56 @@ impl PlatformDataReader {
 
     async fn generate_png(&self) -> NativeExtensionsResult<Vec<u8>> {
         let formats = self.data_object_formats()?;
-        // prefer DIBV5 with alpha channel
+        
+        // Try to get data with safe wrappers, prefer DIBV5 with alpha channel
         let data = if formats.contains(&(CF_DIBV5.0 as u32)) {
-            Ok(self.data_object.get_data(CF_DIBV5.0 as u32)?)
+            let format_etc = crate::win32::common::make_format_with_tymed(CF_DIBV5.0 as u32, TYMED(TYMED_HGLOBAL.0));
+            match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+                Some(medium) => {
+                    let data = unsafe {
+                        let hglobal = medium.Anonymous.hGlobal;
+                        let ptr = GlobalLock(hglobal);
+                        let size = GlobalSize(hglobal);
+                        let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+                        let data = slice.to_vec();
+                        GlobalUnlock(hglobal);
+                        data
+                    };
+                    
+                    unsafe {
+                        windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                    }
+                    
+                    Ok(data)
+                }
+                None => Err(NativeExtensionsError::OtherError(
+                    "CF_DIBV5 format not available".into(),
+                ))
+            }
         } else if formats.contains(&(CF_DIB.0 as u32)) {
-            Ok(self.data_object.get_data(CF_DIB.0 as u32)?)
+            let format_etc = crate::win32::common::make_format_with_tymed(CF_DIB.0 as u32, TYMED(TYMED_HGLOBAL.0));
+            match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+                Some(medium) => {
+                    let data = unsafe {
+                        let hglobal = medium.Anonymous.hGlobal;
+                        let ptr = GlobalLock(hglobal);
+                        let size = GlobalSize(hglobal);
+                        let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+                        let data = slice.to_vec();
+                        GlobalUnlock(hglobal);
+                        data
+                    };
+                    
+                    unsafe {
+                        windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                    }
+                    
+                    Ok(data)
+                }
+                None => Err(NativeExtensionsError::OtherError(
+                    "CF_DIB format not available".into(),
+                ))
+            }
         } else {
             Err(NativeExtensionsError::OtherError(
                 "No DIB or DIBV5 data found in data object".into(),
@@ -286,16 +331,38 @@ impl PlatformDataReader {
         } else {
             let formats = self.data_object_formats()?;
             if formats.contains(&format) {
-                let mut data = self.data_object.get_data(format)?;
-                // CF_UNICODETEXT text may be null terminated - in which case trucate
-                // the text before sending it to Dart.
-                if format == CF_UNICODETEXT.0 as u32 {
-                    let terminator = data.chunks(2).position(|c| c == [0; 2]);
-                    if let Some(terminator) = terminator {
-                        data.truncate(terminator * 2);
+                let format_etc = crate::win32::common::make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0));
+                match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+                    Some(medium) => {
+                        let mut data = unsafe { 
+                            let hglobal = medium.Anonymous.hGlobal;
+                            let ptr = GlobalLock(hglobal);
+                            let size = GlobalSize(hglobal);
+                            let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+                            slice.to_vec()
+                        };
+                        
+                        // CF_UNICODETEXT text may be null terminated - in which case truncate
+                        // the text before sending it to Dart.
+                        if format == CF_UNICODETEXT.0 as u32 {
+                            let terminator = data.chunks(2).position(|c| c == [0; 2]);
+                            if let Some(terminator) = terminator {
+                                data.truncate(terminator * 2);
+                            }
+                        }
+                        
+                        unsafe {
+                            GlobalUnlock(medium.Anonymous.hGlobal);
+                            windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                        }
+                        
+                        Ok(data.into())
+                    }
+                    None => {
+                        log::debug!("Format {} not available from data object", format);
+                        Ok(Value::Null)
                     }
                 }
-                Ok(data.into())
             } else {
                 // possibly virtual
                 Ok(Value::Null)
@@ -337,10 +404,29 @@ impl PlatformDataReader {
     {
         if self.hdrop.borrow().is_none() {
             let files = if self.data_object.has_data(CF_HDROP.0 as u32) {
-                let data = self.data_object.get_data(CF_HDROP.0 as u32)?;
-                let files = Self::extract_drop_files(&data)?;
-
-                Some(files)
+                let format_etc = crate::win32::common::make_format_with_tymed(CF_HDROP.0 as u32, TYMED(TYMED_HGLOBAL.0));
+                match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+                    Some(medium) => {
+                        let data = unsafe {
+                            let hglobal = medium.Anonymous.hGlobal;
+                            let ptr = GlobalLock(hglobal);
+                            let size = GlobalSize(hglobal);
+                            let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+                            let data = slice.to_vec();
+                            GlobalUnlock(hglobal);
+                            data
+                        };
+                        
+                        let files = Self::extract_drop_files(&data)?;
+                        
+                        unsafe {
+                            windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                        }
+                        
+                        Some(files)
+                    }
+                    None => None
+                }
             } else {
                 None
             };
@@ -368,8 +454,29 @@ impl PlatformDataReader {
         if self.file_descriptors.borrow().is_none() {
             let format = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) };
             let descriptors = if self.data_object.has_data(format) {
-                let data = self.data_object.get_data(format)?;
-                Some(Self::extract_file_descriptors(data)?)
+                let format_etc = crate::win32::common::make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
+                match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+                    Some(medium) => {
+                        let data = unsafe {
+                            let hglobal = medium.Anonymous.hGlobal;
+                            let ptr = GlobalLock(hglobal);
+                            let size = GlobalSize(hglobal);
+                            let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+                            let data = slice.to_vec();
+                            GlobalUnlock(hglobal);
+                            data
+                        };
+                        
+                        let descriptors = Self::extract_file_descriptors(data)?;
+                        
+                        unsafe {
+                            windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                        }
+                        
+                        Some(descriptors)
+                    }
+                    None => None
+                }
             } else {
                 None
             };
@@ -627,16 +734,12 @@ impl PlatformDataReader {
             TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0),
             descriptor.index as i32,
         );
-        if self.data_object.has_data_for_format(&format) {
-            unsafe {
-                let medium = DataObject::with_local_request(|| {
-                    self.data_object.GetData(&format as *const _)
-                })?;
-                Ok(medium)
-            }
-        } else {
-            Err(NativeExtensionsError::VirtualFileReceiveError(
-                "item not found".into(),
+        
+        // Use safe wrapper to check and get data
+        match crate::win32::common::safe_get_data(&self.data_object, &format)? {
+            Some(medium) => Ok(medium),
+            None => Err(NativeExtensionsError::VirtualFileReceiveError(
+                "item not found or format not available".into(),
             ))
         }
     }
