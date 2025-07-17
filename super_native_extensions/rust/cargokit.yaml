@@ -13,4 +13,4 @@ precompiled_binaries:
   url_prefix: https://github.com/marcosgcd/super_native_extensions/releases/download/precompiled_
 
   # Public key for verifying downloaded prebuilt binaries.
-  public_key: bb1a78fa7670545b02e903e1dab5e6c464ad687c9af1c8677f1e79e150a001c5
+  public_key: 08bc6414fa204b30c27f928928e624273679c2cadde5d4328d3c0dc3ab294ca4
