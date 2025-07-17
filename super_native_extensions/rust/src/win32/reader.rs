@@ -58,10 +58,10 @@ use crate::{
 
 use super::{
     common::{
-        copy_stream_to_file, extract_formats, format_from_string, format_to_string,
-        read_stream_fully,
+        copy_stream_to_file, format_from_string, format_to_string,
+        read_stream_fully, safe_get_data, safe_enum_format_etc, make_format_with_tymed,
     },
-    data_object::{DataObject, GetData},
+    data_object::GetData,
     image_conversion::convert_to_png,
 };
 
@@ -110,7 +110,7 @@ impl PlatformDataReader {
         match formats {
             Some(formats) => Ok(formats),
             None => {
-                let formats: Vec<u32> = match crate::win32::common::safe_enum_format_etc(&self.data_object) {
+                let formats: Vec<u32> = match safe_enum_format_etc(&self.data_object) {
                     Ok(formats) => formats
                         .iter()
                         .filter_map(|f| {
@@ -231,8 +231,8 @@ impl PlatformDataReader {
         
         // Try to get data with safe wrappers, prefer DIBV5 with alpha channel
         let data = if formats.contains(&(CF_DIBV5.0 as u32)) {
-            let format_etc = crate::win32::common::make_format_with_tymed(CF_DIBV5.0 as u32, TYMED(TYMED_HGLOBAL.0));
-            match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+            let format_etc = make_format_with_tymed(CF_DIBV5.0 as u32, TYMED(TYMED_HGLOBAL.0));
+            match safe_get_data(&self.data_object, &format_etc)? {
                 Some(medium) => {
                     let data = unsafe {
                         let hglobal = medium.Anonymous.hGlobal;
@@ -245,7 +245,7 @@ impl PlatformDataReader {
                     };
                     
                     unsafe {
-                        windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                        ReleaseStgMedium(&medium);
                     }
                     
                     Ok(data)
@@ -255,8 +255,8 @@ impl PlatformDataReader {
                 ))
             }
         } else if formats.contains(&(CF_DIB.0 as u32)) {
-            let format_etc = crate::win32::common::make_format_with_tymed(CF_DIB.0 as u32, TYMED(TYMED_HGLOBAL.0));
-            match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+            let format_etc = make_format_with_tymed(CF_DIB.0 as u32, TYMED(TYMED_HGLOBAL.0));
+            match safe_get_data(&self.data_object, &format_etc)? {
                 Some(medium) => {
                     let data = unsafe {
                         let hglobal = medium.Anonymous.hGlobal;
@@ -269,7 +269,7 @@ impl PlatformDataReader {
                     };
                     
                     unsafe {
-                        windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                        ReleaseStgMedium(&medium);
                     }
                     
                     Ok(data)
@@ -331,8 +331,8 @@ impl PlatformDataReader {
         } else {
             let formats = self.data_object_formats()?;
             if formats.contains(&format) {
-                let format_etc = crate::win32::common::make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0));
-                match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+                let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0));
+                match safe_get_data(&self.data_object, &format_etc)? {
                     Some(medium) => {
                         let mut data = unsafe { 
                             let hglobal = medium.Anonymous.hGlobal;
@@ -353,7 +353,7 @@ impl PlatformDataReader {
                         
                         unsafe {
                             GlobalUnlock(medium.Anonymous.hGlobal);
-                            windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                            ReleaseStgMedium(&medium);
                         }
                         
                         Ok(data.into())
@@ -404,8 +404,8 @@ impl PlatformDataReader {
     {
         if self.hdrop.borrow().is_none() {
             let files = if self.data_object.has_data(CF_HDROP.0 as u32) {
-                let format_etc = crate::win32::common::make_format_with_tymed(CF_HDROP.0 as u32, TYMED(TYMED_HGLOBAL.0));
-                match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+                let format_etc = make_format_with_tymed(CF_HDROP.0 as u32, TYMED(TYMED_HGLOBAL.0));
+                match safe_get_data(&self.data_object, &format_etc)? {
                     Some(medium) => {
                         let data = unsafe {
                             let hglobal = medium.Anonymous.hGlobal;
@@ -420,7 +420,7 @@ impl PlatformDataReader {
                         let files = Self::extract_drop_files(&data)?;
                         
                         unsafe {
-                            windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                            ReleaseStgMedium(&medium);
                         }
                         
                         Some(files)
@@ -454,8 +454,8 @@ impl PlatformDataReader {
         if self.file_descriptors.borrow().is_none() {
             let format = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) };
             let descriptors = if self.data_object.has_data(format) {
-                let format_etc = crate::win32::common::make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
-                match crate::win32::common::safe_get_data(&self.data_object, &format_etc)? {
+                let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
+                match safe_get_data(&self.data_object, &format_etc)? {
                     Some(medium) => {
                         let data = unsafe {
                             let hglobal = medium.Anonymous.hGlobal;
@@ -470,7 +470,7 @@ impl PlatformDataReader {
                         let descriptors = Self::extract_file_descriptors(data)?;
                         
                         unsafe {
-                            windows::Win32::System::Com::ReleaseStgMedium(&medium);
+                            ReleaseStgMedium(&medium);
                         }
                         
                         Some(descriptors)
@@ -736,7 +736,7 @@ impl PlatformDataReader {
         );
         
         // Use safe wrapper to check and get data
-        match crate::win32::common::safe_get_data(&self.data_object, &format)? {
+        match safe_get_data(&self.data_object, &format)? {
             Some(medium) => Ok(medium),
             None => Err(NativeExtensionsError::VirtualFileReceiveError(
                 "item not found or format not available".into(),
