@@ -80,10 +80,22 @@ pub fn extract_formats(object: &IDataObject) -> windows::core::Result<Vec<FORMAT
     loop {
         let mut format = [FORMATETC::default()];
         let mut fetched = 0u32;
-        if unsafe { e.Next(&mut format, Some(&mut fetched as *mut _)) }.is_err() || fetched == 0 {
-            break;
+        match unsafe { e.Next(&mut format, Some(&mut fetched as *mut _)) } {
+            Ok(()) if fetched > 0 => {
+                res.push(format[0]);
+            }
+            Ok(()) => break, // fetched == 0, no more items
+            Err(err) => {
+                // Check if this is DV_E_FORMATETC (0x80040064) - invalid FORMATETC structure
+                if err.code().0 == 0x80040064u32 as i32 {
+                    // This is a common error with some data objects, just break out of the loop
+                    break;
+                } else {
+                    // For other errors, propagate them
+                    return Err(err);
+                }
+            }
         }
-        res.push(format[0]);
     }
     Ok(res)
 }

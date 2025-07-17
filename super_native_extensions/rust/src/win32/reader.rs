@@ -110,18 +110,26 @@ impl PlatformDataReader {
         match formats {
             Some(formats) => Ok(formats),
             None => {
-                let formats: Vec<u32> = extract_formats(&self.data_object)?
-                    .iter()
-                    .filter_map(|f| {
-                        if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
-                            || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
-                        {
-                            Some(f.cfFormat as u32)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                let formats: Vec<u32> = match extract_formats(&self.data_object) {
+                    Ok(formats) => formats
+                        .iter()
+                        .filter_map(|f| {
+                            if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
+                                || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
+                            {
+                                Some(f.cfFormat as u32)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    Err(err) => {
+                        // If we can't extract formats, return empty list rather than failing
+                        // This is common with some data objects that have corrupt format structures
+                        log::warn!("Failed to extract formats from data object: {}", err);
+                        Vec::new()
+                    }
+                };
                 self.formats_raw.replace(Some(formats.clone()));
                 Ok(formats)
             }

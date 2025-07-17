@@ -5,6 +5,9 @@ use std::{
     sync::Arc,
 };
 
+// hallo
+// hallo 2
+
 use irondash_engine_context::EngineContext;
 use irondash_message_channel::{Late, Value};
 use irondash_run_loop::{platform::PollSession, RunLoop};
@@ -167,6 +170,7 @@ impl PlatformDropContext {
 
     fn drop_exit(&self) -> NativeExtensionsResult<()> {
         if let Some(session) = self.current_session.borrow().as_ref().cloned() {
+            log::debug!("drop_exit: sending drop leave for session {:?}", session.id);
             self.delegate()?.send_drop_leave(
                 self.id,
                 BaseDropEvent {
@@ -179,6 +183,7 @@ impl PlatformDropContext {
 
     fn drop_end(&self) -> NativeExtensionsResult<()> {
         if let Some(session) = self.current_session.borrow_mut().take() {
+            log::debug!("drop_end: ending session {:?}", session.id);
             self.delegate()?.send_drop_ended(
                 self.id,
                 BaseDropEvent {
@@ -197,6 +202,7 @@ impl PlatformDropContext {
             .map(|s| s.missing_drop_end.get())
             .unwrap_or(false);
         if missing_drop_end {
+            log::debug!("local_dragging_did_end: ending session that was missing drop_end");
             self.drop_end()?;
         }
         Ok(())
@@ -268,6 +274,7 @@ impl PlatformDropContext {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> NativeExtensionsResult<()> {
+        log::debug!("on_drag_enter: position=({}, {}), effect={:?}", pt.x, pt.y, unsafe { *pdweffect });
         if self.current_session.borrow().is_some() && !self.local_dragging()? {
             // shouldn't happen
             if self
@@ -278,12 +285,15 @@ impl PlatformDropContext {
                 .is_inside
                 .get()
             {
+                log::warn!("on_drag_enter: unexpected drag enter while session is inside");
                 self.drop_exit()?;
             }
+            log::debug!("on_drag_enter: ending previous session");
             self.drop_end()?;
         }
         let effect = unsafe { &mut *pdweffect };
         if let Some(data_object) = pdataobj {
+            log::debug!("on_drag_enter: creating new session for data object");
             let delegate = self.delegate()?;
             let session = self
                 .current_session
@@ -308,8 +318,10 @@ impl PlatformDropContext {
                     );
                     let registered_reader =
                         delegate.register_platform_reader(self.id, reader.clone());
+                    let session_id = self.next_session_id.next_id().into();
+                    log::debug!("on_drag_enter: created new session with ID {:?}", session_id);
                     Rc::new(Session {
-                        id: self.next_session_id.next_id().into(),
+                        id: session_id,
                         is_inside: Cell::new(true),
                         missing_drop_end: Cell::new(false),
                         data_object: data_object.clone(),
@@ -334,9 +346,11 @@ impl PlatformDropContext {
             );
             *effect = session.last_operation.get().to_platform();
         } else {
+            log::debug!("on_drag_enter: no data object provided, setting DROPEFFECT_NONE");
             *effect = DROPEFFECT_NONE;
         }
 
+        log::debug!("on_drag_enter: final effect={:?}", *effect);
         Ok(())
     }
 
@@ -346,6 +360,7 @@ impl PlatformDropContext {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> NativeExtensionsResult<()> {
+        log::trace!("on_drag_over: position=({}, {}), effect={:?}", pt.x, pt.y, unsafe { *pdweffect });
         let effect = unsafe { &mut *pdweffect };
         if let Some(session) = self.current_session.borrow().as_ref().cloned() {
             session.missing_drop_end.set(false);
@@ -361,14 +376,17 @@ impl PlatformDropContext {
             );
             *effect = session.last_operation.get().to_platform();
         } else {
+            log::debug!("on_drag_over: no active session, setting DROPEFFECT_NONE");
             *effect = DROPEFFECT_NONE;
         }
         Ok(())
     }
 
     fn on_drag_leave(&self) -> NativeExtensionsResult<()> {
+        log::debug!("on_drag_leave: leaving drop target");
         self.drop_exit()?;
         let local_dragging = self.local_dragging()?;
+        log::debug!("on_drag_leave: local_dragging={}", local_dragging);
         if let Some(s) = self.current_session.borrow_mut().as_ref() {
             s.is_inside.set(false);
 
@@ -377,7 +395,10 @@ impl PlatformDropContext {
         }
         // Keep session alive for local dragging
         if !local_dragging {
+            log::debug!("on_drag_leave: ending session (not local dragging)");
             self.drop_end()?;
+        } else {
+            log::debug!("on_drag_leave: keeping session alive for local dragging");
         }
         Ok(())
     }
@@ -389,9 +410,11 @@ impl PlatformDropContext {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> NativeExtensionsResult<()> {
+        log::debug!("on_drop: position=({}, {}), effect={:?}", pt.x, pt.y, unsafe { *pdweffect });
         let effect = unsafe { &mut *pdweffect };
         let session = self.current_session.borrow().as_ref().cloned();
         if let Some(session) = session {
+            log::debug!("on_drop: processing drop for session {:?}", session.id);
             *effect = session.last_operation.get().to_platform();
             let event = self.event_for_session(
                 &session,
@@ -414,6 +437,7 @@ impl PlatformDropContext {
             if let Ok(data_object_async) = data_object_async {
                 if let Ok(res) = unsafe { data_object_async.GetAsyncMode() } {
                     if res.as_bool() {
+                        log::debug!("on_drop: data object supports async mode");
                         // this will be read by drop notifier in DataReader and used for
                         // IDataObjectAsyncCapability::EndOperation result (when data reader gets dropped)
                         session
@@ -423,19 +447,29 @@ impl PlatformDropContext {
                         unsafe {
                             data_object_async.StartOperation(None).ok_log();
                         }
+                    } else {
+                        log::debug!("on_drop: data object does not support async mode");
                     }
+                } else {
+                    log::debug!("on_drop: failed to get async mode for data object");
                 }
+            } else {
+                log::debug!("on_drop: data object does not support async capability");
             }
             let mut poll_session = PollSession::new();
+            log::debug!("on_drop: waiting for drop operation to complete");
             while !done.get() {
                 RunLoop::current()
                     .platform_run_loop
                     .poll_once(&mut poll_session);
             }
+            log::debug!("on_drop: drop operation completed, ending session");
             self.drop_end()?;
         } else {
+            log::debug!("on_drop: no active session, setting DROPEFFECT_NONE");
             *effect = DROPEFFECT_NONE;
         }
+        log::debug!("on_drop: final effect={:?}", *effect);
         Ok(())
     }
 }
