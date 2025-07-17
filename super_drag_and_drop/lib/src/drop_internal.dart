@@ -70,6 +70,7 @@ class _DropSession extends DropSession {
       existing ??= current.firstWhereOrNull(
         (element) => element._item.itemId == item.itemId,
       );
+      existing ??= _DropItem._(item);
       existing._item = item;
       _items.add(existing);
     }
