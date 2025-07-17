@@ -59,8 +59,7 @@ use crate::{
 use super::{
     common::{
         copy_stream_to_file, extract_formats, format_from_string, format_to_string,
-        read_stream_fully, is_outlook_email_drag, enumerate_formats_safely,
-        query_format_with_fallback_safe, safe_get_data,
+        read_stream_fully,
     },
     data_object::{DataObject, GetData},
     image_conversion::convert_to_png,
@@ -101,13 +100,7 @@ impl PlatformDataReader {
         } else if !self.data_object_formats()?.is_empty() {
             Ok(1)
         } else {
-            // If no formats are available, check if this is an Outlook drag operation
-            if is_outlook_email_drag(&self.data_object) {
-                log::info!("Outlook email drag detected, returning 1 item");
-                Ok(1)
-            } else {
-                Ok(0)
-            }
+            Ok(0)
         }
     }
 
@@ -115,40 +108,28 @@ impl PlatformDataReader {
     fn data_object_formats_raw(&self) -> NativeExtensionsResult<Vec<u32>> {
         let formats = self.formats_raw.clone().take();
         match formats {
-            Some(formats) => {
-                log::debug!("Using cached formats: {} formats", formats.len());
-                Ok(formats)
-            }
+            Some(formats) => Ok(formats),
             None => {
-                log::info!("Enumerating formats for first time");
-                let formats: Vec<u32> = match enumerate_formats_safely(&self.data_object) {
-                    Ok(formatetc_vec) => {
-                        log::info!("Format enumeration succeeded, got {} formats", formatetc_vec.len());
-                        formatetc_vec
-                            .iter()
-                            .filter_map(|f| {
-                                if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
-                                    || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
-                                {
-                                    Some(f.cfFormat as u32)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    }
-                    Err(e) => {
-                        log::debug!("Format enumeration failed: {}, checking if this is an Outlook drag", e);
-                        if is_outlook_email_drag(&self.data_object) {
-                            log::debug!("Detected Outlook email drag operation, returning empty format list");
-                            vec![]
-                        } else {
-                            log::debug!("Not an Outlook drag, returning empty format list");
-                            vec![]
-                        }
+                let formats: Vec<u32> = match extract_formats(&self.data_object) {
+                    Ok(formats) => formats
+                        .iter()
+                        .filter_map(|f| {
+                            if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
+                                || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
+                            {
+                                Some(f.cfFormat as u32)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    Err(err) => {
+                        // If we can't extract formats, return empty list rather than failing
+                        // This is common with some data objects that have corrupt format structures
+                        log::warn!("Failed to extract formats from data object: {}", err);
+                        Vec::new()
                     }
                 };
-                log::info!("Final format count: {}", formats.len());
                 self.formats_raw.replace(Some(formats.clone()));
                 Ok(formats)
             }
@@ -170,50 +151,15 @@ impl PlatformDataReader {
             let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
             res.push(png);
         }
-        
-        // If we don't have any formats and this is an Outlook drag, try to provide basic fallback formats
-        if res.is_empty() && is_outlook_email_drag(&self.data_object) {
-            log::info!("Outlook drag detected, providing fallback format IDs");
-            // Try to register common Outlook formats
-            if let Ok(msg_format) = unsafe { RegisterClipboardFormatW(&HSTRING::from("RenPrivateMessages")) } {
-                res.push(msg_format);
-            }
-            if let Ok(attach_format) = unsafe { RegisterClipboardFormatW(&HSTRING::from("RenPrivateAttachments")) } {
-                res.push(attach_format);
-            }
-            if let Ok(fd_format) = unsafe { RegisterClipboardFormatW(&HSTRING::from("FileGroupDescriptor")) } {
-                res.push(fd_format);
-            }
-            if let Ok(url_format) = unsafe { RegisterClipboardFormatW(&HSTRING::from("UniformResourceLocator")) } {
-                res.push(url_format);
-            }
-        }
-        
         Ok(res)
     }
 
     pub fn get_formats_for_item_sync(&self, item: i64) -> NativeExtensionsResult<Vec<String>> {
         let mut formats = if item == 0 {
-            let data_formats = self.data_object_formats()?;
-            if data_formats.is_empty() && is_outlook_email_drag(&self.data_object) {
-                // For Outlook drag operations, provide common formats that might be available
-                log::info!("Outlook drag detected, providing fallback formats");
-                vec![
-                    "RenPrivateMessages".to_string(),
-                    "RenPrivateAttachments".to_string(),
-                    "FileGroupDescriptor".to_string(),
-                    "FileContents".to_string(),
-                    "UniformResourceLocator".to_string(),
-                    "CF_HDROP".to_string(),
-                    "CF_TEXT".to_string(),
-                    "CF_UNICODETEXT".to_string(),
-                ]
-            } else {
-                data_formats
-                    .iter()
-                    .map(|f| format_to_string(*f))
-                    .collect()
-            }
+            self.data_object_formats()?
+                .iter()
+                .map(|f| format_to_string(*f))
+                .collect()
         } else if item > 0 {
             let hdrop_len = self.with_hdrop(|h| Ok(h.map(|f| f.len()).unwrap_or(0)))?;
             if item < hdrop_len as i64 {
@@ -284,33 +230,9 @@ impl PlatformDataReader {
         let formats = self.data_object_formats()?;
         // prefer DIBV5 with alpha channel
         let data = if formats.contains(&(CF_DIBV5.0 as u32)) {
-            match self.data_object.get_data_safe(CF_DIBV5.0 as u32) {
-                Ok(Some(data)) => Ok(data),
-                Ok(None) => {
-                    log::debug!("DIBV5 format not available");
-                    Err(NativeExtensionsError::OtherError(
-                        "DIBV5 format not available".into(),
-                    ))
-                }
-                Err(e) => {
-                    log::warn!("Failed to get DIBV5 data: {}", e);
-                    Err(e)
-                }
-            }
+            Ok(self.data_object.get_data(CF_DIBV5.0 as u32)?)
         } else if formats.contains(&(CF_DIB.0 as u32)) {
-            match self.data_object.get_data_safe(CF_DIB.0 as u32) {
-                Ok(Some(data)) => Ok(data),
-                Ok(None) => {
-                    log::debug!("DIB format not available");
-                    Err(NativeExtensionsError::OtherError(
-                        "DIB format not available".into(),
-                    ))
-                }
-                Err(e) => {
-                    log::warn!("Failed to get DIB data: {}", e);
-                    Err(e)
-                }
-            }
+            Ok(self.data_object.get_data(CF_DIB.0 as u32)?)
         } else {
             Err(NativeExtensionsError::OtherError(
                 "No DIB or DIBV5 data found in data object".into(),
@@ -364,28 +286,16 @@ impl PlatformDataReader {
         } else {
             let formats = self.data_object_formats()?;
             if formats.contains(&format) {
-                match self.data_object.get_data_safe(format) {
-                    Ok(Some(mut data)) => {
-                        // CF_UNICODETEXT text may be null terminated - in which case truncate
-                        // the text before sending it to Dart.
-                        if format == CF_UNICODETEXT.0 as u32 {
-                            let terminator = data.chunks(2).position(|c| c == [0; 2]);
-                            if let Some(terminator) = terminator {
-                                data.truncate(terminator * 2);
-                            }
-                        }
-                        Ok(data.into())
-                    }
-                    Ok(None) => {
-                        log::debug!("Format {} not available", format);
-                        Ok(Value::Null)
-                    }
-                    Err(e) => {
-                        log::debug!("Failed to get data for format {}: {}", format, e);
-                        Ok(Value::Null)
+                let mut data = self.data_object.get_data(format)?;
+                // CF_UNICODETEXT text may be null terminated - in which case trucate
+                // the text before sending it to Dart.
+                if format == CF_UNICODETEXT.0 as u32 {
+                    let terminator = data.chunks(2).position(|c| c == [0; 2]);
+                    if let Some(terminator) = terminator {
+                        data.truncate(terminator * 2);
                     }
                 }
-                }
+                Ok(data.into())
             } else {
                 // possibly virtual
                 Ok(Value::Null)
@@ -427,20 +337,10 @@ impl PlatformDataReader {
     {
         if self.hdrop.borrow().is_none() {
             let files = if self.data_object.has_data(CF_HDROP.0 as u32) {
-                match self.data_object.get_data_safe(CF_HDROP.0 as u32) {
-                    Ok(Some(data)) => {
-                        let files = Self::extract_drop_files(&data)?;
-                        Some(files)
-                    }
-                    Ok(None) => {
-                        log::debug!("HDROP format not available");
-                        None
-                    }
-                    Err(e) => {
-                        log::debug!("Failed to get HDROP data: {}", e);
-                        None
-                    }
-                }
+                let data = self.data_object.get_data(CF_HDROP.0 as u32)?;
+                let files = Self::extract_drop_files(&data)?;
+
+                Some(files)
             } else {
                 None
             };
@@ -468,17 +368,8 @@ impl PlatformDataReader {
         if self.file_descriptors.borrow().is_none() {
             let format = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) };
             let descriptors = if self.data_object.has_data(format) {
-                match self.data_object.get_data_safe(format) {
-                    Ok(Some(data)) => Some(Self::extract_file_descriptors(data)?),
-                    Ok(None) => {
-                        log::debug!("File descriptor format not available");
-                        None
-                    }
-                    Err(e) => {
-                        log::debug!("Failed to get file descriptor data: {}", e);
-                        None
-                    }
-                }
+                let data = self.data_object.get_data(format)?;
+                Some(Self::extract_file_descriptors(data)?)
             } else {
                 None
             };
@@ -739,10 +630,8 @@ impl PlatformDataReader {
         if self.data_object.has_data_for_format(&format) {
             unsafe {
                 let medium = DataObject::with_local_request(|| {
-                    safe_get_data(&self.data_object, &format)
-                })?.ok_or_else(|| NativeExtensionsError::VirtualFileReceiveError(
-                    "item not found".into(),
-                ))?;
+                    self.data_object.GetData(&format as *const _)
+                })?;
                 Ok(medium)
             }
         } else {
