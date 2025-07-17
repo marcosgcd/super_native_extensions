@@ -1,3 +1,20 @@
+## 1025.1.1
+
+> Note: This release has breaking changes.
+
+ - **FIX**: do not use path dependencies for published packages in pubspec.yaml (#183).
+ - **FIX**: update engine_context dependency.
+ - **FIX**: [android] build failing with proguard enabled (#114).
+ - **FIX**: minor clean-ups.
+ - **FEAT**: improve compatibility with current Flutter main (#163).
+ - **FEAT**: add super_hot_key (#77).
+ - **FEAT**: migrate to irondash (#27).
+ - **FEAT**: add_super_keyboard_layout (#20).
+ - **DOCS**: update NDK installation information (#149).
+ - **DOCS**: Improve documentation.
+ - **BREAKING** **FEAT**: upgrade to Dart 3 and jni 0.21.1 (#138).
+ - **BREAKING** **FEAT**: implement unified content receiving (#47).
+
 ## 0.9.1
 
 ## 0.9.0

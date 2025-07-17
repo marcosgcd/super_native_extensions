@@ -1,3 +1,11 @@
+## 1025.1.1
+
+> Note: This release has breaking changes.
+
+ - **FIX**: hot key event handlers should not be required (#248).
+ - **FEAT**: add super_hot_key (#77).
+ - **BREAKING** **FEAT**: upgrade to Dart 3 and jni 0.21.1 (#138).
+
 ## 0.9.1
 
  - Bump "super_hot_key" to `0.9.1`.

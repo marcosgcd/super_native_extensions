@@ -1,3 +1,40 @@
+## 1025.1.1
+
+> Note: This release has breaking changes.
+
+ - **FIX**: correct GIF uniform type identifier (#276).
+ - **FIX**: readFile fails when item is a String (#202).
+ - **FIX**: do not use path dependencies for published packages in pubspec.yaml (#183).
+ - **FIX**: update engine_context dependency.
+ - **FIX**: correct imports and add missing exports (#155).
+ - **FIX**: [android] build failing with proguard enabled (#114).
+ - **FIX**: properly unitialize com on windows.
+ - **FIX**: minor clean-ups.
+ - **FEAT**: add flac and ogg format definitions (#331).
+ - **FEAT**: add m4a format definition (#306).
+ - **FEAT**: improve performance with large number of items (#283).
+ - **FEAT**: implement copy and cut events (#253).
+ - **FEAT**: preventDefault for paste event (#249).
+ - **FEAT**: implement paste event on web (#246).
+ - **FEAT**: add support for epub and md (#205).
+ - **FEAT**: improve compatibility with current Flutter main (#163).
+ - **FEAT**: add htmlFile format (#107).
+ - **FEAT**: make format in DataReader.getFile optional (#90).
+ - **FEAT**: add Formats.plainTextFile.
+ - **FEAT**: declare more well-known formats (#58).
+ - **FEAT**: cleanup receiving of files (#54).
+ - **FEAT**: initialize ole on windows (#51).
+ - **FEAT**: migrate to irondash (#27).
+ - **FEAT**: add_super_keyboard_layout (#20).
+ - **DOCS**: update comments.
+ - **DOCS**: [android] mention minSdkVersion in readme (#150).
+ - **DOCS**: update NDK installation information (#149).
+ - **BREAKING** **FIX**: correct typos and spelling in code (#156).
+ - **BREAKING** **FEAT**: upgrade to Dart 3 and jni 0.21.1 (#138).
+ - **BREAKING** **FEAT**: implement unified content receiving (#47).
+ - **BREAKING** **FEAT**: refactor format (#46).
+ - **BREAKING** **CHORE**: remove Pair and replace it with dart 3 record (#157).
+
 ## 0.9.1
 
 ## 0.9.0

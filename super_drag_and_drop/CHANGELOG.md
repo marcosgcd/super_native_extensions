@@ -1,3 +1,55 @@
+## 1025.1.1
+
+> Note: This release has breaking changes.
+
+ - **FIX**: super_drag_and_drop should reexport Format (#83).
+ - **FIX**: detect drag cancelled on desktop while waiting for data (#377).
+ - **FIX**: various exceptions when getting snapshots (#328).
+ - **FIX**: various exceptions when getting snapshots (#327).
+ - **FIX**: [ios] respect isLocationDraggable check (#109).
+ - **FIX**: multi-touch issues on Android (#196).
+ - **FIX**: do not use path dependencies for published packages in pubspec.yaml (#183).
+ - **FIX**: update engine_context dependency.
+ - **FIX**: ensure drop regions are attached when invoking events (#147).
+ - **FIX**: cancel mouse hover during dragging (#34).
+ - **FIX**: cache active items for snapshotter (#146).
+ - **FIX**: minor clean-ups.
+ - **FIX**: [android] build failing with proguard enabled (#114).
+ - **FIX**: Improve Drag&Drop on Web (#19).
+ - **FIX**: properly unitialize com on windows.
+ - **FEAT**: increase hit slop required for dragging on desktop (#463).
+ - **FEAT**: improve performance with large number of items (#283).
+ - **FEAT**: use super_sliver_list in example (#281).
+ - **FEAT**: improve touch device detection (#227).
+ - **FEAT**: add_super_keyboard_layout (#20).
+ - **FEAT**: improve compatibility with current Flutter main (#163).
+ - **FEAT**: migrate to irondash (#27).
+ - **FEAT**: expose isLocationDraggable  for DraggableWidget (#31).
+ - **FEAT**: super_drag_and_drop: reexport formats from super_clipboard (#32).
+ - **FEAT**: allow merging of snapshot prepare requests (#110).
+ - **FEAT**: improve performance with large number of items (#274).
+ - **FEAT**: simplify lift snapshot logic on iOS (#108).
+ - **FEAT**: initialize ole on windows (#51).
+ - **FEAT**: cleanup receiving of files (#54).
+ - **FEAT**: improve snapshot API (#101).
+ - **FEAT**: use widget to customize snapshot setting (#100).
+ - **FEAT**: implement drag shadow on all platforms (#87).
+ - **FEAT**: [drop] add support for slivers (#35).
+ - **DOCS**: fix typo.
+ - **DOCS**: minor fix.
+ - **DOCS**: improve super_drag_and_drop documentation (#106).
+ - **DOCS**: fix typo.
+ - **DOCS**: update NDK installation information (#149).
+ - **DOCS**: fix example.
+ - **DOCS**: fix typo (#473).
+ - **DOCS**: [android] mention minSdkVersion in readme (#150).
+ - **DOCS**: update comments.
+ - **DOCS**: fix example.
+ - **BREAKING** **FIX**: correct typos and spelling in code (#156).
+ - **BREAKING** **FEAT**: implement unified content receiving (#47).
+ - **BREAKING** **FEAT**: refactor format (#46).
+ - **BREAKING** **FEAT**: upgrade to Dart 3 and jni 0.21.1 (#138).
+
 ## 0.9.1
 
 ## 0.9.0

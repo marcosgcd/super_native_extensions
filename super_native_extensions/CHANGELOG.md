@@ -1,3 +1,130 @@
+## 1025.1.1
+
+> Note: This release has breaking changes.
+
+ - **FIX**: no security scope NSURL access on macos (#271).
+ - **FIX**: update public key for verifying downloaded prebuilt binaries in cargokit.yaml.
+ - **FIX**: update public key for verifying downloaded prebuilt binaries in cargokit.yaml.
+ - **FIX**: update public key for verifying prebuilt binaries in cargokit.yaml.
+ - **FIX**: Synthetize mouse up event during drag on linux.
+ - **FIX**: Workaround for Xcode warning.
+ - **FIX**: Broken buid on iOS with Rust 1.65.
+ - **FIX**: crash on android with merged platform and UI threads (#483).
+ - **FIX**: widget snapshots not working properly with WASM (#469).
+ - **FIX**: clipboard read error on wasm (#464).
+ - **FIX**: workaround for exception when running in test environment (#458).
+ - **FIX**: drag crashing on Android 15 (#453).
+ - **FIX**: workaround for deadlock on iOS 18 (#449).
+ - **FIX**: FFI errors in flutter tester.
+ - **FIX**: don't panic with thread local AccessError when shutting down (#426).
+ - **FIX**: Avoid adding duplicate listeners for drag-n-drop on the web (#422).
+ - **FIX**: compilation error on web with latest Flutter main (#425).
+ - **FIX**: do not build release binary with nightly (#412).
+ - **FIX**: panic in ANSI branch of extract_drop_files (#404).
+ - **FIX**: synthesize_button_up might cause crash on Linux (#394).
+ - **FIX**: dragging stuck on web when cancelled too quickly (#398).
+ - **FIX**: paste caused crash when clipboard is empty on linux  (#393).
+ - **FIX**: hide menu drag preview immediately when pan gesture detected (#385).
+ - **FIX**: invalid javascript object cast (#380).
+ - **FIX**: context menu on iPad with universal control (#378).
+ - **FIX**: detect drag cancelled on desktop while waiting for data (#377).
+ - **FIX**: use startDragAndDrop instead of startDrag on Android sdk24 and above (#372).
+ - **FIX**: remove obsolete code (#364).
+ - **FIX**: ignore scroll event in web drag driver.
+ - **FIX**: ignore unknown pointer device kind (#344).
+ - **FIX**: delay menu fade-out on iOS (#333).
+ - **FIX**: regression with custom snapshot (#330).
+ - **FIX**: various exceptions when getting snapshots (#327).
+ - **FIX**: fit menu position to bounds after inflating (#322).
+ - **FIX**: assertion when taking snapshot of material widget (#320).
+ - **FIX**: remove leftover logging (#284).
+ - **FIX**: create phony file in BUILD_PRODUCTS_DIR.
+ - **FIX**: [android] possible deadlock when reading from clipboard (#282).
+ - **FIX**: minor clean-ups.
+ - **FIX**: [ios] store user interaction properly (#272).
+ - **FIX**: update public key for verifying downloaded prebuilt binaries in cargokit.yaml.
+ - **FIX**: make clippy happy (#36).
+ - **FIX**: access NSURL within security scope (#264).
+ - **FIX**: rare crash while dragging on iOS (#40).
+ - **FIX**: window dragging on macos with full size content view (#43).
+ - **FIX**: serialize invocation of drop events (#49).
+ - **FIX**: increase buffer size.
+ - **FIX**: let zone handle menu callback errors (#228).
+ - **FIX**: lift image being ignored on iOS (#59).
+ - **FIX**: remove trailing null terminator from NSString (#207).
+ - **FIX**: [iOS] crash when deferred image is set too quickly (#206).
+ - **FIX**: [macOS] missing image on NSMenuItem with children (#197).
+ - **FIX**: multi-touch issues on Android (#196).
+ - **FIX**: improve closing of menu overlay on touch devices (#193).
+ - **FIX**: update engine_context dependency.
+ - **FIX**: escape script invocation in podspec.
+ - **FIX**: declare proper output in podspec script phase.
+ - **FIX**: update rust dependencies (#170).
+ - **FIX**: [windows] handle null terminator in CF_UNICODETEXT (#169).
+ - **FIX**: do not recreate drag and drop contexts on hot reload (#61).
+ - **FIX**: use destructive icon theme when serializing menu images (#162).
+ - **FIX**: [windows] keep IDataObjectAsyncCapability reference during drop (#161).
+ - **FIX**: [windows] properly handle data objects that don't support async capability (#160).
+ - **FIX**: [macos] error instead of panic when no mouse event is found (#60).
+ - **FIX**: regression when dropping plain text on web (#66).
+ - **FIX**: formatting.
+ - **FIX**: [macos] assertion when loading deferred menu (#152).
+ - **FIX**: [macos] control key stuck after context menu closed (#151).
+ - **FIX**: web drag avatar shown in non-root overlay (#139).
+ - **FIX**: [windows] use cached length when reading virtual stream (#69).
+ - **FIX**: pasting text with semicolon on macOS (#133).
+ - **FIX**: [win] rewind OLE streams before reading (#117).
+ - **FIX**: [android] local data only dragging not working (#115).
+ - **FIX**: [android] build failing with proguard enabled (#114).
+ - **FIX**: clipboard copy on web in release mode (#72).
+ - **FIX**: custom snapshot should propagate exception from renderbox (#104).
+ - **FIX**: [ios] revert memory leak fix removal (#103).
+ - **FIX**: [android] throw exception if wrong mime filter is requested.
+ - **FIX**: use unpremultiplied alpha for encoding image data (#85).
+ - **FIX**: [windows] pasting files from explorer (#88).
+ - **FIX**: Improve Drag&Drop on Web (#19).
+ - **FIX**: [ios] use shadow path from correct image (#97).
+ - **FIX**: [web] dragging ocasionally getting stuck (#89).
+ - **FIX**: [ios] force separate drag image to account for shadow difference (#92).
+ - **FIX**: [web] dropping over platform views not working (#99).
+ - **FEAT**: try revoking drop target first on windows (#63).
+ - **FEAT**: use widget to customize snapshot setting (#100).
+ - **FEAT**: implement drag shadow on all platforms (#87).
+ - **FEAT**: improve snapshot API (#101).
+ - **FEAT**: [macos] receiving virtual files from outlook attachments (#81).
+ - **FEAT**: add super_hot_key (#77).
+ - **FEAT**: snapshot optimization (#102).
+ - **FEAT**: allow merging of snapshot prepare requests (#110).
+ - **FEAT**: add_super_keyboard_layout (#20).
+ - **FEAT**: [windows] use thread pool for virtual file background thread (#68).
+ - **FEAT**: [windows] delay virtual file request until IStream is read (#67).
+ - **FEAT**: update public key for precompiled binaries.
+ - **FEAT**: [ios] use real shadow path instead of layer shadow (#95).
+ - **FEAT**: configure own precompiled binaries release.
+ - **FEAT**: improve compatibility with current Flutter main (#163).
+ - **FEAT**: improve touch device detection (#227).
+ - **FEAT**: declare more well-known formats (#58).
+ - **FEAT**: migrate to objc2 (#239).
+ - **FEAT**: add support for inplace file reading on ios (#55).
+ - **FEAT**: cleanup receiving of files (#54).
+ - **FEAT**: add support for the maximum page size of 16 KB for Android (#521).
+ - **FEAT**: initialize ole on windows (#51).
+ - **FEAT**: implement paste event on web (#246).
+ - **FEAT**(macOS): preliminary support for writing tools (#441).
+ - **FEAT**: [ios] remove drag item provider memory leak workaround (#93).
+ - **FEAT**: implement copy and cut events (#253).
+ - **FEAT**: prevent finalizer invoked too early in release mode (#38).
+ - **FEAT**: [windows] cache file descriptors in reader (#266).
+ - **FEAT**: improve performance with large number of items (#274).
+ - **FEAT**: improve performance with large number of items (#283).
+ - **FEAT**: migrate to irondash (#27).
+ - **FEAT**: preventDefault for paste event (#249).
+ - **BREAKING** **FIX**: correct typos and spelling in code (#156).
+ - **BREAKING** **FEAT**: implement unified content receiving (#47).
+ - **BREAKING** **FEAT**: upgrade to Dart 3 and jni 0.21.1 (#138).
+ - **BREAKING** **FEAT**: refactor format (#46).
+ - **BREAKING** **CHORE**: remove Pair and replace it with dart 3 record (#157).
+
 ## 0.9.1
 
 ## 0.9.0

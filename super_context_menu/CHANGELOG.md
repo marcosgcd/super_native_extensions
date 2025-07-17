@@ -1,3 +1,27 @@
+## 1025.1.1
+
+> Note: This release has breaking changes.
+
+ - **FIX**: regression when context menu sometimes does not show (#220).
+ - **FIX**: properly handle overlapping menu widgets (#217).
+ - **FIX**: multi-touch issues on Android (#196).
+ - **FIX**: do not use path dependencies for published packages in pubspec.yaml (#183).
+ - **FIX**: update engine_context dependency.
+ - **FIX**: [iOS] gesture recognizer workaround (#176).
+ - **FIX**: use destructive icon theme when serializing menu images (#162).
+ - **FIX**: context menu in list view not working on iOS (#144).
+ - **FEAT**: improve focus interaction with non-native context menu (#442).
+ - **FEAT**(macOS): preliminary support for writing tools (#441).
+ - **FEAT**: export default builder to make it enable for use single brightness (#416).
+ - **FEAT**: improve touch device detection (#227).
+ - **FEAT**: restore focus before invoking menu callback (#191).
+ - **FEAT**: improve compatibility with current Flutter main (#163).
+ - **FEAT**: implement safe triangle for desktop menu (#153).
+ - **DOCS**: update NDK installation information (#149).
+ - **DOCS**: fixup unnecessary capitalization.
+ - **BREAKING** **FIX**: correct typos and spelling in code (#156).
+ - **BREAKING** **FEAT**: upgrade to Dart 3 and jni 0.21.1 (#138).
+
 ## 0.9.1
 
 ## 0.9.0
