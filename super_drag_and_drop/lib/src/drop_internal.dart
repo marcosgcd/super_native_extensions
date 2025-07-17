@@ -12,7 +12,7 @@ import 'package:super_native_extensions/raw_clipboard.dart' as raw;
 import 'package:super_clipboard/src/reader_internal.dart';
 
 import 'util.dart';
-import 'drop.dart';
+import 'drop_md.dart';
 
 class _DropItem extends DropItem {
   _DropItem._(this._item);
@@ -67,19 +67,18 @@ class _DropSession extends DropSession {
       if (existing != null && existing._item.itemId != item.itemId) {
         existing = null;
       }
-      existing ??= current
-          .firstWhereOrNull((element) => element._item.itemId == item.itemId);
-      if (existing != null) {
-        existing._item = item;
-        _items.add(existing);
-      } else {
-        _items.add(_DropItem._(item));
-      }
+      existing ??= current.firstWhereOrNull(
+        (element) => element._item.itemId == item.itemId,
+      );
+      existing._item = item;
+      _items.add(existing);
     }
 
     final itemsNeedingReaders = _items
-        .where((element) =>
-            element._item.readerItem != null && element._reader == null)
+        .where(
+          (element) =>
+              element._item.readerItem != null && element._reader == null,
+        )
         .toList(growable: false);
 
     if (itemsNeedingReaders.isEmpty) {
@@ -118,10 +117,12 @@ class _DropSession extends DropSession {
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is RenderDropRegion && target.attached && dropRegion == null) {
-        res = await target.onDropOver(DropOverEvent(
-          session: this,
-          position: DropPosition.forRenderObject(position, target),
-        ));
+        res = await target.onDropOver(
+          DropOverEvent(
+            session: this,
+            position: DropPosition.forRenderObject(position, target),
+          ),
+        );
         if (res != raw.DropOperation.none) {
           dropRegion = target;
         }
@@ -165,10 +166,13 @@ class _DropSession extends DropSession {
     required raw.DropOperation acceptedOperation,
   }) async {
     if (_currentDropRegion?.attached == true) {
-      await _currentDropRegion?.onPerformDrop(PerformDropEvent(
+      await _currentDropRegion?.onPerformDrop(
+        PerformDropEvent(
           session: this,
           position: DropPosition.forRenderObject(location, _currentDropRegion!),
-          acceptedOperation: acceptedOperation));
+          acceptedOperation: acceptedOperation,
+        ),
+      );
     }
   }
 
@@ -201,13 +205,17 @@ class _DropSession extends DropSession {
   }
 
   Future<raw.ItemPreview?> getDropItemPreview(
-      raw.ItemPreviewRequest request) async {
-    final item = _items
-        .firstWhereOrNull((element) => element._item.itemId == request.itemId);
+    raw.ItemPreviewRequest request,
+  ) async {
+    final item = _items.firstWhereOrNull(
+      (element) => element._item.itemId == request.itemId,
+    );
     if (item != null && _currentDropRegion != null) {
       final req = _DropItemPreviewRequest(item: item, request: request);
-      final response =
-          await _currentDropRegion?.onGetDropItemPreview?.call(this, req);
+      final response = await _currentDropRegion?.onGetDropItemPreview?.call(
+        this,
+        req,
+      );
       if (response != null) {
         return raw.ItemPreview(
           destinationRect: response.destinationRect,
@@ -227,8 +235,9 @@ class _DropSession extends DropSession {
   void debugFillProperties(DiagnosticPropertiesBuilder properties) {
     super.debugFillProperties(properties);
     properties.add(DiagnosticsProperty('items', _items));
-    properties
-        .add(DiagnosticsProperty('allowedOperations', _allowedOperations));
+    properties.add(
+      DiagnosticsProperty('allowedOperations', _allowedOperations),
+    );
     properties.defaultDiagnosticsTreeStyle = DiagnosticsTreeStyle.sparse;
   }
 
@@ -242,10 +251,7 @@ class _DropSession extends DropSession {
 }
 
 class _DropItemPreviewRequest extends DropItemPreviewRequest {
-  _DropItemPreviewRequest({
-    required this.item,
-    required this.request,
-  });
+  _DropItemPreviewRequest({required this.item, required this.request});
 
   @override
   final DropItem item;
@@ -275,12 +281,11 @@ class _DropContextDelegate extends raw.DropContextDelegate {
 
   @override
   Future<raw.DropOperation> onDropUpdate(raw.DropEvent event) async {
-    final session =
-        _sessions.putIfAbsent(event.sessionId, () => _DropSession());
-    await session.updateItems(
-      event.items,
-      isDrop: false,
+    final session = _sessions.putIfAbsent(
+      event.sessionId,
+      () => _DropSession(),
     );
+    await session.updateItems(event.items, isDrop: false);
     return session.update(
       position: event.locationInView,
       allowedOperations: Set.from(event.allowedOperations),
@@ -289,7 +294,8 @@ class _DropContextDelegate extends raw.DropContextDelegate {
 
   @override
   Future<raw.ItemPreview?> onGetItemPreview(
-      raw.ItemPreviewRequest request) async {
+    raw.ItemPreviewRequest request,
+  ) async {
     final session = _sessions[request.sessionId];
     return session?.getDropItemPreview(request);
   }
@@ -323,7 +329,8 @@ class DropFormatRegistry {
   }
 
   DropFormatRegistration registerPlatformDropFormats(
-      List<PlatformFormat> formats) {
+    List<PlatformFormat> formats,
+  ) {
     final registration = DropFormatRegistration._(this);
     _registeredFormats[registration] = formats;
     _updateIfNeeded();
