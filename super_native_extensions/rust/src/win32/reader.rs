@@ -59,7 +59,7 @@ use crate::{
 use super::{
     common::{
         copy_stream_to_file, format_from_string, format_to_string,
-        read_stream_fully, safe_get_data, safe_enum_format_etc, make_format_with_tymed,
+        read_stream_fully, safe_get_data, safe_enum_format_etc, safe_slice_from_global_memory, make_format_with_tymed,
     },
     data_object::GetData,
     image_conversion::convert_to_png,
@@ -236,19 +236,19 @@ impl PlatformDataReader {
                 Some(mut medium) => {
                     let data = unsafe {
                         let hglobal = medium.u.hGlobal;
-                        let ptr = GlobalLock(hglobal);
-                        let size = GlobalSize(hglobal);
-                        let slice = std::slice::from_raw_parts(ptr as *const u8, size);
-                        let data = slice.to_vec();
-                        GlobalUnlock(hglobal);
-                        data
+                        safe_slice_from_global_memory(hglobal)
                     };
                     
                     unsafe {
                         ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                     }
                     
-                    Ok(data)
+                    match data {
+                        Some(data) => Ok(data),
+                        None => Err(NativeExtensionsError::OtherError(
+                            "Failed to read CF_DIBV5 data from memory".into(),
+                        ))
+                    }
                 }
                 None => Err(NativeExtensionsError::OtherError(
                     "CF_DIBV5 format not available".into(),
@@ -260,19 +260,19 @@ impl PlatformDataReader {
                 Some(mut medium) => {
                     let data = unsafe {
                         let hglobal = medium.u.hGlobal;
-                        let ptr = GlobalLock(hglobal);
-                        let size = GlobalSize(hglobal);
-                        let slice = std::slice::from_raw_parts(ptr as *const u8, size);
-                        let data = slice.to_vec();
-                        GlobalUnlock(hglobal);
-                        data
+                        safe_slice_from_global_memory(hglobal)
                     };
                     
                     unsafe {
                         ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                     }
                     
-                    Ok(data)
+                    match data {
+                        Some(data) => Ok(data),
+                        None => Err(NativeExtensionsError::OtherError(
+                            "Failed to read CF_DIB data from memory".into(),
+                        ))
+                    }
                 }
                 None => Err(NativeExtensionsError::OtherError(
                     "CF_DIB format not available".into(),
@@ -336,27 +336,30 @@ impl PlatformDataReader {
                     Some(mut medium) => {
                         let mut data = unsafe { 
                             let hglobal = medium.u.hGlobal;
-                            let ptr = GlobalLock(hglobal);
-                            let size = GlobalSize(hglobal);
-                            let slice = std::slice::from_raw_parts(ptr as *const u8, size);
-                            slice.to_vec()
+                            safe_slice_from_global_memory(hglobal)
                         };
                         
-                        // CF_UNICODETEXT text may be null terminated - in which case truncate
-                        // the text before sending it to Dart.
-                        if format == CF_UNICODETEXT.0 as u32 {
-                            let terminator = data.chunks(2).position(|c| c == [0; 2]);
-                            if let Some(terminator) = terminator {
-                                data.truncate(terminator * 2);
-                            }
-                        }
-                        
                         unsafe {
-                            GlobalUnlock(medium.u.hGlobal);
                             ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                         }
                         
-                        Ok(data.into())
+                        match data {
+                            Some(mut data) => {
+                                // CF_UNICODETEXT text may be null terminated - in which case truncate
+                                // the text before sending it to Dart.
+                                if format == CF_UNICODETEXT.0 as u32 {
+                                    let terminator = data.chunks(2).position(|c| c == [0; 2]);
+                                    if let Some(terminator) = terminator {
+                                        data.truncate(terminator * 2);
+                                    }
+                                }
+                                Ok(data.into())
+                            }
+                            None => {
+                                log::warn!("Failed to read format {} data from memory", format);
+                                Ok(Value::Null)
+                            }
+                        }
                     }
                     None => {
                         log::debug!("Format {} not available from data object", format);
@@ -409,21 +412,23 @@ impl PlatformDataReader {
                     Some(mut medium) => {
                         let data = unsafe {
                             let hglobal = medium.u.hGlobal;
-                            let ptr = GlobalLock(hglobal);
-                            let size = GlobalSize(hglobal);
-                            let slice = std::slice::from_raw_parts(ptr as *const u8, size);
-                            let data = slice.to_vec();
-                            GlobalUnlock(hglobal);
-                            data
+                            safe_slice_from_global_memory(hglobal)
                         };
-                        
-                        let files = Self::extract_drop_files(&data)?;
                         
                         unsafe {
                             ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                         }
                         
-                        Some(files)
+                        match data {
+                            Some(data) => {
+                                let files = Self::extract_drop_files(&data)?;
+                                Some(files)
+                            }
+                            None => {
+                                log::warn!("Failed to read CF_HDROP data from memory");
+                                None
+                            }
+                        }
                     }
                     None => None
                 }
@@ -459,21 +464,23 @@ impl PlatformDataReader {
                     Some(mut medium) => {
                         let data = unsafe {
                             let hglobal = medium.u.hGlobal;
-                            let ptr = GlobalLock(hglobal);
-                            let size = GlobalSize(hglobal);
-                            let slice = std::slice::from_raw_parts(ptr as *const u8, size);
-                            let data = slice.to_vec();
-                            GlobalUnlock(hglobal);
-                            data
+                            safe_slice_from_global_memory(hglobal)
                         };
-                        
-                        let descriptors = Self::extract_file_descriptors(data)?;
                         
                         unsafe {
                             ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                         }
                         
-                        Some(descriptors)
+                        match data {
+                            Some(data) => {
+                                let descriptors = Self::extract_file_descriptors(data)?;
+                                Some(descriptors)
+                            }
+                            None => {
+                                log::warn!("Failed to read file descriptor data from memory");
+                                None
+                            }
+                        }
                     }
                     None => None
                 }
@@ -603,12 +610,14 @@ impl PlatformDataReader {
         match TYMED(medium.tymed as i32) {
             TYMED_HGLOBAL => {
                 let stream = unsafe {
-                    let size = GlobalSize(medium.u.hGlobal);
-                    let data = GlobalLock(medium.u.hGlobal);
-                    let data = slice::from_raw_parts(data as *const u8, size);
-                    let res = SHCreateMemStream(Some(data));
-                    GlobalUnlock(medium.u.hGlobal).ok();
-                    res
+                    let data = safe_slice_from_global_memory(medium.u.hGlobal);
+                    match data {
+                        Some(data) => SHCreateMemStream(Some(&data)),
+                        None => {
+                            log::warn!("Failed to read global memory for stream creation");
+                            None
+                        }
+                    }
                 };
                 match stream {
                     Some(stream) => Ok(stream),
@@ -663,13 +672,19 @@ impl PlatformDataReader {
             TYMED_HGLOBAL => {
                 let path = get_target_path(&target_folder, file_name);
                 let res = unsafe {
-                    let size = GlobalSize(medium.u.hGlobal);
-                    let data = GlobalLock(medium.u.hGlobal);
-                    let data = slice::from_raw_parts(data as *const u8, size);
-                    let res = fs::write(&path, data);
-                    GlobalUnlock(medium.u.hGlobal).ok();
-                    progress.report_progress(Some(1.0));
-                    res
+                    match safe_slice_from_global_memory(medium.u.hGlobal) {
+                        Some(data) => {
+                            progress.report_progress(Some(1.0));
+                            fs::write(&path, data)
+                        }
+                        None => {
+                            log::warn!("Failed to read global memory for file writing");
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "Failed to read global memory"
+                            ))
+                        }
+                    }
                 };
                 match res {
                     Ok(_) => completer.complete(Ok(path)),

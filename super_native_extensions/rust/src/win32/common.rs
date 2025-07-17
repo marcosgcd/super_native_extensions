@@ -17,6 +17,7 @@ use windows::{
             },
             DataExchange::{GetClipboardFormatNameW, RegisterClipboardFormatW},
             LibraryLoader::{GetProcAddress, LoadLibraryA},
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
         },
         UI::HiDpi::{MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE},
     },
@@ -339,4 +340,36 @@ pub fn safe_enum_format_etc(object: &IDataObject) -> windows::core::Result<Vec<F
         }
         Err(err) => Err(err),
     }
+}
+
+/// Safely creates a slice from global memory with proper validation
+/// Returns Some(data) if successful, None if validation fails
+/// Automatically handles GlobalLock/GlobalUnlock lifecycle
+pub unsafe fn safe_slice_from_global_memory(hglobal: windows::Win32::Foundation::HGLOBAL) -> Option<Vec<u8>> {
+    let ptr = GlobalLock(hglobal);
+    if ptr.is_null() {
+        log::warn!("GlobalLock returned null pointer");
+        return None;
+    }
+    
+    let size = GlobalSize(hglobal);
+    if size == 0 {
+        log::debug!("GlobalSize returned 0");
+        GlobalUnlock(hglobal);
+        return None;
+    }
+    
+    // Check if size exceeds isize::MAX (required for slice::from_raw_parts safety)
+    if size > isize::MAX as usize {
+        log::error!("Global memory size {} exceeds isize::MAX", size);
+        GlobalUnlock(hglobal);
+        return None;
+    }
+    
+    // Create slice and copy to Vec to avoid lifetime issues
+    let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+    let data = slice.to_vec();
+    
+    GlobalUnlock(hglobal);
+    Some(data)
 }
