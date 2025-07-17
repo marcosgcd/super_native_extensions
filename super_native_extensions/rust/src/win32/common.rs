@@ -308,7 +308,6 @@ pub fn copy_stream_to_file(stream: &IStream, path: &Path) -> NativeExtensionsRes
 
 /// Safe wrapper for IDataObject::GetData that checks format availability first
 pub fn safe_get_data(obj: &IDataObject, fmt: &FORMATETC) -> NativeExtensionsResult<Option<windows::Win32::System::Com::STGMEDIUM>> {
-    use windows::Win32::System::Com::STGMEDIUM;
     
     unsafe {
         // Check availability first

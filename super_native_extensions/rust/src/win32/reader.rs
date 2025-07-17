@@ -233,9 +233,9 @@ impl PlatformDataReader {
         let data = if formats.contains(&(CF_DIBV5.0 as u32)) {
             let format_etc = make_format_with_tymed(CF_DIBV5.0 as u32, TYMED(TYMED_HGLOBAL.0));
             match safe_get_data(&self.data_object, &format_etc)? {
-                Some(medium) => {
+                Some(mut medium) => {
                     let data = unsafe {
-                        let hglobal = medium.Anonymous.hGlobal;
+                        let hglobal = medium.u.hGlobal;
                         let ptr = GlobalLock(hglobal);
                         let size = GlobalSize(hglobal);
                         let slice = std::slice::from_raw_parts(ptr as *const u8, size);
@@ -245,7 +245,7 @@ impl PlatformDataReader {
                     };
                     
                     unsafe {
-                        ReleaseStgMedium(&medium);
+                        ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                     }
                     
                     Ok(data)
@@ -257,9 +257,9 @@ impl PlatformDataReader {
         } else if formats.contains(&(CF_DIB.0 as u32)) {
             let format_etc = make_format_with_tymed(CF_DIB.0 as u32, TYMED(TYMED_HGLOBAL.0));
             match safe_get_data(&self.data_object, &format_etc)? {
-                Some(medium) => {
+                Some(mut medium) => {
                     let data = unsafe {
-                        let hglobal = medium.Anonymous.hGlobal;
+                        let hglobal = medium.u.hGlobal;
                         let ptr = GlobalLock(hglobal);
                         let size = GlobalSize(hglobal);
                         let slice = std::slice::from_raw_parts(ptr as *const u8, size);
@@ -269,7 +269,7 @@ impl PlatformDataReader {
                     };
                     
                     unsafe {
-                        ReleaseStgMedium(&medium);
+                        ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                     }
                     
                     Ok(data)
@@ -333,9 +333,9 @@ impl PlatformDataReader {
             if formats.contains(&format) {
                 let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0));
                 match safe_get_data(&self.data_object, &format_etc)? {
-                    Some(medium) => {
+                    Some(mut medium) => {
                         let mut data = unsafe { 
-                            let hglobal = medium.Anonymous.hGlobal;
+                            let hglobal = medium.u.hGlobal;
                             let ptr = GlobalLock(hglobal);
                             let size = GlobalSize(hglobal);
                             let slice = std::slice::from_raw_parts(ptr as *const u8, size);
@@ -352,8 +352,8 @@ impl PlatformDataReader {
                         }
                         
                         unsafe {
-                            GlobalUnlock(medium.Anonymous.hGlobal);
-                            ReleaseStgMedium(&medium);
+                            GlobalUnlock(medium.u.hGlobal);
+                            ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                         }
                         
                         Ok(data.into())
@@ -406,9 +406,9 @@ impl PlatformDataReader {
             let files = if self.data_object.has_data(CF_HDROP.0 as u32) {
                 let format_etc = make_format_with_tymed(CF_HDROP.0 as u32, TYMED(TYMED_HGLOBAL.0));
                 match safe_get_data(&self.data_object, &format_etc)? {
-                    Some(medium) => {
+                    Some(mut medium) => {
                         let data = unsafe {
-                            let hglobal = medium.Anonymous.hGlobal;
+                            let hglobal = medium.u.hGlobal;
                             let ptr = GlobalLock(hglobal);
                             let size = GlobalSize(hglobal);
                             let slice = std::slice::from_raw_parts(ptr as *const u8, size);
@@ -420,7 +420,7 @@ impl PlatformDataReader {
                         let files = Self::extract_drop_files(&data)?;
                         
                         unsafe {
-                            ReleaseStgMedium(&medium);
+                            ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                         }
                         
                         Some(files)
@@ -456,9 +456,9 @@ impl PlatformDataReader {
             let descriptors = if self.data_object.has_data(format) {
                 let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
                 match safe_get_data(&self.data_object, &format_etc)? {
-                    Some(medium) => {
+                    Some(mut medium) => {
                         let data = unsafe {
-                            let hglobal = medium.Anonymous.hGlobal;
+                            let hglobal = medium.u.hGlobal;
                             let ptr = GlobalLock(hglobal);
                             let size = GlobalSize(hglobal);
                             let slice = std::slice::from_raw_parts(ptr as *const u8, size);
@@ -470,7 +470,7 @@ impl PlatformDataReader {
                         let descriptors = Self::extract_file_descriptors(data)?;
                         
                         unsafe {
-                            ReleaseStgMedium(&medium);
+                            ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
                         }
                         
                         Some(descriptors)
