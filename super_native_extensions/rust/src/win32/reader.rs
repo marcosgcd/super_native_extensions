@@ -304,7 +304,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 5 - Enhanced Outlook Web Support with Content Extraction");
+        log::warn!("current version 6 - Enhanced Outlook Web Support with Content Extraction (Fixed Compilation)");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -340,42 +340,6 @@ impl PlatformDataReader {
         let formats = self.data_object_formats_raw()?;
         let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
         log::warn!("Available formats for fallback naming: {:?}", format_strings);
-        
-        // Check for FILECONTENTS explicitly
-        let has_file_contents = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
-        log::warn!("Has CFSTR_FILECONTENTS: {}", has_file_contents);
-        
-        // Enhanced content format detection for Outlook web
-        let content_format_checks = [
-            "text/plain",
-            "text/html", 
-            "message/rfc822",
-            "application/vnd.ms-outlook",
-            "NativeShell_CF_15", // This appeared in the logs - might be Outlook-specific
-            "Chromium Web Custom MIME Data Format", // Outlook web format
-        ];
-        
-        let has_content_formats: Vec<&str> = content_format_checks
-            .iter()
-            .filter(|&format| {
-                let hstring = HSTRING::from(*format);
-                let cf_format = unsafe { RegisterClipboardFormatW(&hstring) };
-                let has_format = self.data_object.has_data(cf_format);
-                if has_format {
-                    log::warn!("*** FOUND CONTENT FORMAT: {} ***", format);
-                }
-                has_format
-            })
-            .copied()
-            .collect();
-            
-        if !has_content_formats.is_empty() {
-            log::warn!("*** DETECTED CONTENT FORMATS: {:?} ***", has_content_formats);
-        }
-        
-        // Check if we can actually extract text content
-        let has_extractable_content = self.has_outlook_web_email_content().unwrap_or(false);
-        log::warn!("Has extractable email content: {}", has_extractable_content);
         
         // Check for FILECONTENTS explicitly
         let has_file_contents = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
@@ -1593,8 +1557,13 @@ impl PlatformDataReader {
         // Create the email content
         let email_content = self.create_outlook_email_file().await?;
         let content_bytes = match email_content {
-            Value::List(bytes) => bytes.into_iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect(),
-            _ => Vec::new(),
+            Value::U8List(bytes) => bytes,
+            Value::I8List(bytes) => bytes.into_iter().map(|b| b as u8).collect(),
+            Value::String(text) => text.into_bytes(),
+            _ => {
+                log::warn!("Unexpected email content type, converting to bytes");
+                Vec::new()
+            }
         };
         
         if content_bytes.is_empty() {

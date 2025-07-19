@@ -6,6 +6,7 @@ I've made comprehensive improvements to handle Outlook email drag and drop when 
 1. **Modern Outlook Web Rendering**: Outlook now uses Chromium-based web rendering internally, exposing different clipboard formats than traditional COM-based formats
 2. **Missing CFSTR_FILECONTENTS**: The traditional `CFSTR_FILECONTENTS` format is not available 
 3. **Web Browser Formats**: Instead of email formats, we see formats like `"DragContext", "DragImageBits", "chromium/x-renderer-taint", "NativeShell_CF_15", "Chromium Web Custom MIME Data Format"`
+4. **Compilation Error**: Fixed Value type handling for proper data extraction
 
 ### Major Improvements Made
 
@@ -35,6 +36,11 @@ I've made comprehensive improvements to handle Outlook email drag and drop when 
 - Updated `copy_virtual_file_for_item` to create email files from web content
 - Added `copy_outlook_web_email_file` method for web-to-file conversion
 
+#### 6. Fixed Compilation Issues
+- Fixed `Value` type handling in `copy_outlook_web_email_file`
+- Removed duplicate code sections
+- Proper handling of different Value variants (`U8List`, `I8List`, `String`)
+
 ### Expected Behavior Changes
 
 When dragging an email from modern Outlook:
@@ -50,10 +56,16 @@ When dragging an email from modern Outlook:
 1. Rebuild the Rust library: `cargo build` in the `rust/` directory
 2. Rebuild the Flutter app
 3. Try dragging an email from Outlook desktop application
-4. Check the logs for detection messages starting with "current version 5"
+4. Check the logs for detection messages starting with "current version 6"
 5. Verify that an `.eml` file is created with email content
 
 The logs should now show:
+- "current version 6 - Enhanced Outlook Web Support with Content Extraction (Fixed Compilation)"
 - "Detected Outlook message: traditional=false, modern_web=true, web_with_content=true"
 - "Found X bytes of text/HTML content for email"
 - "Successfully extracted email content from Outlook web formats"
+
+### Version History
+- Version 6: Fixed compilation errors, cleaned up duplicate code, proper Value type handling
+- Version 5: Enhanced Outlook Web Support with Content Extraction
+- Version 4: Enhanced Outlook Support
