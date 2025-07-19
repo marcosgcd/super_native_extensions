@@ -24,14 +24,19 @@ use windows::{
     core::{w, HSTRING},
     Win32::{
         Foundation::S_OK,
-        Storage::FileSystem::{
-            SetFileAttributesW, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN,
-            FILE_ATTRIBUTE_TEMPORARY,
+        Storage::{
+            FileSystem::{
+                SetFileAttributesW, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN,
+                FILE_ATTRIBUTE_TEMPORARY,
+            },
+            StructuredStorage::{
+                StgCreateDocfile, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE,
+            },
         },
         System::{
             Com::{
-                IDataObject, IStream, STATFLAG_NONAME, STATSTG, STGMEDIUM, STREAM_SEEK_SET, TYMED,
-                TYMED_HGLOBAL, TYMED_ISTREAM,
+                IDataObject, IStream, IStorage, STATFLAG_NONAME, STATSTG, STGMEDIUM, STREAM_SEEK_SET, TYMED,
+                TYMED_HGLOBAL, TYMED_ISTREAM, TYMED_ISTORAGE,
             },
             DataExchange::RegisterClipboardFormatW,
             Memory::{GlobalSize},
@@ -64,6 +69,13 @@ use super::{
     image_conversion::convert_to_png,
 };
 
+// Constants for file descriptor formats
+const CFSTR_FILEDESCRIPTORW: &str = "FileGroupDescriptorW";
+const CFSTR_FILEDESCRIPTORA: &str = "FileGroupDescriptor";
+
+// File descriptor flags
+const FD_FILESIZE: u32 = 0x00000040;
+
 pub struct PlatformDataReader {
     data_object: IDataObject,
     _drop_notifier: Option<Arc<DropNotifier>>,
@@ -79,6 +91,7 @@ struct FileDescriptor {
     name: String,
     format: String,
     index: usize,
+    expected_size: Option<u64>,
 }
 
 impl PlatformDataReader {
@@ -248,12 +261,25 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 3");
+        log::warn!("current version 4 - Enhanced Outlook Support");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
             log::debug!("Found virtual file descriptor with name: '{}'", descriptor.name);
-            return Ok(Some(descriptor.name));
+            
+            // If this is likely an Outlook message and we don't have .msg extension, prefer .msg
+            let mut name = descriptor.name.clone();
+            if self.probably_outlook_message()? {
+                if !name.to_ascii_lowercase().ends_with(".msg") && 
+                   !name.to_ascii_lowercase().ends_with(".eml") &&
+                   !name.contains('.') {
+                    // For Outlook messages without extension, prefer .msg for storage support
+                    name.push_str(".msg");
+                    log::debug!("Added .msg extension for Outlook message: '{}'", name);
+                }
+            }
+            
+            return Ok(Some(name));
         } else {
             log::debug!("No virtual file descriptor found for item {}", item);
         }
@@ -299,30 +325,11 @@ impl PlatformDataReader {
             log::warn!("*** DETECTED CONTENT FORMATS: {:?} ***", has_content_formats);
         }
         
-        // Additional Outlook-specific format checks
-        let outlook_formats = [
-            "RenPrivateMessages",
-            "RenPrivateItem", 
-            "Outlook Message",
-            "FileGroupDescriptor",
-            "FileGroupDescriptorW",
-            "FileContents",
-        ];
-        
-        let detected_outlook_formats: Vec<&str> = outlook_formats
-            .iter()
-            .filter(|&format| format_strings.iter().any(|f| f.contains(format)))
-            .copied()
-            .collect();
-            
-        if !detected_outlook_formats.is_empty() {
-            log::warn!("*** DETECTED OUTLOOK-SPECIFIC FORMATS: {:?} ***", detected_outlook_formats);
-        } else {
-            log::warn!("*** NO OUTLOOK-SPECIFIC FORMATS DETECTED - This might indicate modern Outlook using web rendering ***");
-        }
-        
-        // Generate fallback name based on available formats
-        let fallback_name = if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
+        // Generate fallback name based on available formats and Outlook detection
+        let fallback_name = if self.probably_outlook_message()? {
+            log::warn!("Detected Outlook message - creating .msg file for potential storage support");
+            "outlook_message.msg"
+        } else if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
             log::warn!("Detected Chromium/web browser source - but user is dragging from Outlook desktop");
             // Since user is dragging from Outlook but we're seeing web browser formats,
             // this might be Outlook using internal web rendering.
@@ -334,25 +341,25 @@ impl PlatformDataReader {
                 || format_strings.iter().any(|f| f.contains("text/") || f.contains("html"));
                 
             if has_email_indicators {
-                log::warn!("Outlook with web rendering + potential email content - creating .eml file for email drag");
-                "outlook_email.eml"
+                log::warn!("Outlook with web rendering + potential email content - creating .msg file for email drag");
+                "outlook_email.msg"
             } else {
-                log::warn!("Outlook with web rendering but no clear email indicators - still creating .eml since user said Outlook");
-                "outlook_email.eml" // Default to .eml for Outlook drags even without clear indicators
+                log::warn!("Outlook with web rendering but no clear email indicators - still creating .msg since user said Outlook");
+                "outlook_email.msg" // Default to .msg for Outlook drags even without clear indicators
             }
         } else if format_strings.iter().any(|f| f.contains("FILECONTENTS")) {
             log::debug!("Detected FILECONTENTS format - checking for email message drag");
             // Check if this might be an email message from Outlook
             if format_strings.iter().any(|f| f.contains("RenPrivateMessages") || f.contains("CF_HDROP") || f.contains("FileGroupDescriptor")) {
-                log::debug!("Detected email message drag from Outlook - generating .eml fallback name");
-                "outlook_message.eml"
+                log::debug!("Detected email message drag from Outlook - generating .msg fallback name");
+                "outlook_message.msg"
             } else {
                 log::debug!("FILECONTENTS without clear Outlook indicators - assuming email since user said Outlook");
-                "outlook_email.eml"
+                "outlook_email.msg"
             }
         } else if has_file_contents {
             log::warn!("Has FILECONTENTS but no clear format indicators - since user is dragging from Outlook, assuming email");
-            "outlook_email.eml"
+            "outlook_email.msg"
         } else if format_strings.iter().any(|f| f.contains("PNG") || f.contains("JFIF") || f.contains("GIF")) {
             log::debug!("Detected image format - generating image fallback name");
             "image.tmp"
@@ -361,7 +368,7 @@ impl PlatformDataReader {
             "text_content.txt"
         } else {
             log::debug!("No specific format detected - since user is dragging from Outlook, defaulting to email");
-            "outlook_email.eml"
+            "outlook_email.msg"
         };
         
         log::warn!("No file name could be determined for item {}, using fallback: \"{}\"", item, fallback_name);
@@ -599,15 +606,24 @@ impl PlatformDataReader {
         F: FnOnce(Option<&[FileDescriptor]>) -> NativeExtensionsResult<R>,
     {
         if self.file_descriptors.borrow().is_none() {
-            let format = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) };
-            log::debug!("Checking for file descriptors with format: {}", format);
+            let fmt_w = unsafe { RegisterClipboardFormatW(&HSTRING::from(CFSTR_FILEDESCRIPTORW)) };
+            let fmt_a = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) };
+            log::debug!("Checking for file descriptors (Unicode first): fmt_w={}, fmt_a={}", fmt_w, fmt_a);
             
-            let descriptors = if self.data_object.has_data(format) {
-                log::debug!("Data object has file descriptor format");
+            let mut descriptors = None;
+            let candidates = [(fmt_w, "Unicode"), (fmt_a, "ANSI")];
+            
+            for (format, variant) in candidates {
+                if !self.data_object.has_data(format) { 
+                    log::debug!("Data object does not have {} file descriptor format", variant);
+                    continue; 
+                }
+                
+                log::debug!("Data object has {} file descriptor format", variant);
                 let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
                 match safe_get_data(&self.data_object, &format_etc)? {
                     Some(mut medium) => {
-                        log::debug!("Successfully got file descriptor medium");
+                        log::debug!("Successfully got {} file descriptor medium", variant);
                         let data = unsafe {
                             let hglobal = medium.u.hGlobal;
                             safe_slice_from_global_memory(hglobal)
@@ -619,48 +635,27 @@ impl PlatformDataReader {
                         
                         match data {
                             Some(data) => {
-                                log::debug!("Successfully read {} bytes of file descriptor data", data.len());
-                                let descriptors = Self::extract_file_descriptors(data)?;
-                                log::debug!("Successfully extracted {} file descriptors", descriptors.len());
-                                Some(descriptors)
+                                log::debug!("Successfully read {} bytes of {} file descriptor data", data.len(), variant);
+                                let extracted_descriptors = Self::extract_file_descriptors(data)?;
+                                log::debug!("Successfully extracted {} file descriptors from {} variant", extracted_descriptors.len(), variant);
+                                descriptors = Some(extracted_descriptors);
+                                break; // Success, no need to try other variants
                             }
                             None => {
-                                log::warn!("Failed to read file descriptor data from memory - may indicate web browser or email client issue");
-                                // Create fallback descriptor to allow attempts at content retrieval
-                                // Check formats to determine appropriate fallback name
-                                let formats = self.data_object_formats_raw().unwrap_or_default();
-                                let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
-                                
-                                let (fallback_name, fallback_format) = if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
-                                    log::debug!("Detected web browser source - creating web download fallback");
-                                    ("web_download.tmp", "application/octet-stream")
-                                } else if format_strings.iter().any(|f| f.contains("RenPrivateMessages") || f.contains("FileGroupDescriptor")) {
-                                    log::debug!("Detected email message drag from Outlook - creating .eml fallback");
-                                    ("outlook_message.eml", "message/rfc822")
-                                } else {
-                                    log::debug!("Creating generic attachment fallback");
-                                    ("attachment.tmp", "application/octet-stream")
-                                };
-                                
-                                let fallback_descriptor = FileDescriptor {
-                                    name: fallback_name.to_string(),
-                                    format: fallback_format.to_string(),
-                                    index: 0,
-                                };
-                                log::debug!("Created fallback file descriptor: name='{}', format='{}'", fallback_descriptor.name, fallback_descriptor.format);
-                                Some(vec![fallback_descriptor])
+                                log::warn!("Failed to read {} file descriptor data from memory", variant);
+                                continue; // Try next variant
                             }
                         }
                     }
                     None => {
-                        log::debug!("Failed to get file descriptor medium - format not available");
-                        None
+                        log::debug!("Failed to get {} file descriptor medium - format not available", variant);
+                        continue; // Try next variant
                     }
                 }
-            } else {
-                log::debug!("Data object does not have file descriptor format");
-                
-                // Check if we have CFSTR_FILECONTENTS without descriptors (common with email clients and web browsers)
+            }
+            
+            // If no descriptors found but we have CFSTR_FILECONTENTS, create fallback
+            if descriptors.is_none() {
                 let file_contents_format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
                 if self.data_object.has_data(file_contents_format) {
                     log::debug!("Found CFSTR_FILECONTENTS without descriptors - creating fallback descriptor");
@@ -669,12 +664,12 @@ impl PlatformDataReader {
                     let formats = self.data_object_formats_raw().unwrap_or_default();
                     let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
                     
-                    let (fallback_name, fallback_format) = if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
+                    let (fallback_name, fallback_format) = if self.probably_outlook_message()? {
+                        log::debug!("Detected Outlook message drag without descriptors");
+                        ("outlook_message.eml", "message/rfc822")
+                    } else if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
                         log::debug!("Detected web browser source without descriptors");
                         ("web_download.tmp", "application/octet-stream")
-                    } else if format_strings.iter().any(|f| f.contains("RenPrivateMessages") || f.contains("FileGroupDescriptor")) {
-                        log::debug!("Detected email message drag from Outlook without descriptors");
-                        ("outlook_message.eml", "message/rfc822")
                     } else {
                         log::debug!("Detected file content without descriptors (possibly email attachment)");
                         ("attachment.tmp", "application/octet-stream")
@@ -684,14 +679,15 @@ impl PlatformDataReader {
                         name: fallback_name.to_string(),
                         format: fallback_format.to_string(),
                         index: 0,
+                        expected_size: None,
                     };
                     log::debug!("Created fallback descriptor for orphaned content: name='{}', format='{}'", fallback_descriptor.name, fallback_descriptor.format);
-                    Some(vec![fallback_descriptor])
+                    descriptors = Some(vec![fallback_descriptor]);
                 } else {
                     log::debug!("No file content formats found");
-                    None
                 }
-            };
+            }
+            
             self.file_descriptors.replace(Some(descriptors.clone()));
         }
         let descriptors = self.file_descriptors.borrow();
@@ -707,6 +703,18 @@ impl PlatformDataReader {
                 Ok(None)
             }
         })
+    }
+
+    fn probably_outlook_message(&self) -> NativeExtensionsResult<bool> {
+        let formats = self.data_object_formats_raw()?;
+        let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
+        Ok(format_strings.iter().any(|f| {
+            f.contains("FileGroupDescriptor") || 
+            f.contains("RenPrivateMessages") || 
+            f.contains("FileContents") ||
+            f.contains("message/rfc822") ||
+            f.contains("application/vnd.ms-outlook")
+        }))
     }
 
     fn extract_file_descriptors(buffer: Vec<u8>) -> NativeExtensionsResult<Vec<FileDescriptor>> {
@@ -756,14 +764,25 @@ impl PlatformDataReader {
                     name
                 };
                 
+                // Extract expected file size if available
+                let mut expected_size: Option<u64> = None;
+                if (f.dwFlags & FD_FILESIZE) != 0 {
+                    let high = f.nFileSizeHigh as u64;
+                    let low = f.nFileSizeLow as u64;
+                    expected_size = Some((high << 32) | low);
+                    log::debug!("File descriptor {} has size hint: {} bytes", index, expected_size.unwrap());
+                }
+                
                 let format = mime_from_name(&name);
                 let format = mime_to_windows(format);
-                log::debug!("Extracted file descriptor: name='{}', format='{}', index={}", name, format, index);
+                log::debug!("Extracted file descriptor: name='{}', format='{}', index={}, expected_size={:?}", 
+                           name, format, index, expected_size);
                 
                 FileDescriptor {
                     name,
                     format,
                     index,
+                    expected_size,
                 }
             })
             .collect();
@@ -865,6 +884,12 @@ impl PlatformDataReader {
                     )),
                 }
             }
+            TYMED_ISTORAGE => {
+                log::debug!("Processing TYMED_ISTORAGE - cannot create stream directly from storage");
+                Err(NativeExtensionsError::VirtualFileReceiveError(
+                    "IStorage cannot be used as stream - use copy_virtual_file_for_item instead".into(),
+                ))
+            }
             _ => {
                 log::error!("Unsupported TYMED format: {}", medium.tymed);
                 Err(NativeExtensionsError::VirtualFileReceiveError(
@@ -939,6 +964,41 @@ impl PlatformDataReader {
                     }
                 }
             }
+            TYMED_ISTORAGE => {
+                log::debug!("Processing TYMED_ISTORAGE for file '{}'", file_name);
+                match unsafe { medium.u.pstg.as_ref() } {
+                    Some(storage) => {
+                        let mut final_name = file_name.to_string();
+                        if !final_name.to_ascii_lowercase().ends_with(".msg") {
+                            final_name.push_str(".msg");
+                            log::debug!("Added .msg extension to storage file: '{}'", final_name);
+                        }
+                        let path = get_target_path(&target_folder, &final_name);
+                        let res = Self::write_storage_to_compound_file(storage, &path);
+                        progress.report_progress(Some(1.0));
+                        match res {
+                            Ok(_) => {
+                                log::debug!("Successfully wrote compound storage file to: {}", path.display());
+                                completer.complete(Ok(path))
+                            }
+                            Err(err) => {
+                                log::error!("Failed to copy IStorage for '{}': {}", final_name, err);
+                                completer.complete(Err(
+                                    NativeExtensionsError::VirtualFileReceiveError(
+                                        format!("Failed to copy IStorage for '{}': {}", final_name, err)
+                                    ),
+                                ))
+                            }
+                        }
+                    }
+                    None => {
+                        log::error!("IStorage pointer is null for file '{}'", file_name);
+                        completer.complete(Err(
+                            NativeExtensionsError::VirtualFileReceiveError("IStorage missing".into())
+                        ))
+                    }
+                }
+            }
             TYMED_ISTREAM => {
                 log::debug!("Processing TYMED_ISTREAM for file '{}'", file_name);
                 match unsafe { medium.u.pstm.as_ref() } {
@@ -973,10 +1033,58 @@ impl PlatformDataReader {
                     ))),
                 }
             }
-            _ => completer.complete(Err(NativeExtensionsError::VirtualFileReceiveError(
-                "unsupported data format (unexpected tymed)".into(),
-            ))),
+            _ => {
+                log::error!("Unsupported TYMED format: {} for file '{}'", medium.tymed, file_name);
+                completer.complete(Err(NativeExtensionsError::VirtualFileReceiveError(
+                    format!("Unsupported data format (TYMED: {}) for file '{}'", medium.tymed, file_name),
+                )))
+            }
         }
+    }
+
+    fn write_storage_to_compound_file(storage: &IStorage, target: &Path) -> NativeExtensionsResult<()> {
+        unsafe {
+            log::debug!("Creating compound document file at: {}", target.display());
+            
+            // Create destination docfile
+            let mut dest: Option<IStorage> = None;
+            StgCreateDocfile(
+                &HSTRING::from(target.to_string_lossy().as_ref()),
+                STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE,
+                0,
+                &mut dest
+            ).map_err(|e| {
+                log::error!("Failed to create compound document file: {}", e);
+                NativeExtensionsError::VirtualFileReceiveError(
+                    format!("Failed to create compound document: {}", e)
+                )
+            })?;
+            
+            let dest = dest.ok_or_else(|| {
+                NativeExtensionsError::VirtualFileReceiveError(
+                    "Failed to get destination storage interface".into()
+                )
+            })?;
+            
+            // Copy all elements from source to destination
+            storage.CopyTo(0, std::ptr::null(), std::ptr::null(), &dest).map_err(|e| {
+                log::error!("Failed to copy storage contents: {}", e);
+                NativeExtensionsError::VirtualFileReceiveError(
+                    format!("Failed to copy storage contents: {}", e)
+                )
+            })?;
+            
+            // Commit changes
+            dest.Commit(0).map_err(|e| {
+                log::error!("Failed to commit storage: {}", e);
+                NativeExtensionsError::VirtualFileReceiveError(
+                    format!("Failed to commit storage: {}", e)
+                )
+            })?;
+            
+            log::debug!("Successfully created compound document file");
+        }
+        Ok(())
     }
 
     fn descriptor_for_virtual_file(&self, item: i64) -> NativeExtensionsResult<FileDescriptor> {
@@ -996,12 +1104,22 @@ impl PlatformDataReader {
         log::debug!("Attempting to get virtual file content for '{}' at index {} using format {}", 
                    descriptor.name, descriptor.index, format);
         
+        // Check if IStorage support is enabled via environment variable (default: enabled)
+        let enable_storage = std::env::var("ENABLE_OUTLOOK_STORAGE").unwrap_or_else(|_| "1".to_string()) == "1";
+        
         // Try different TYMED combinations in order of preference
-        let tymed_options = [
+        let mut tymed_options = vec![
             TYMED(TYMED_ISTREAM.0), // Prefer IStream first for virtual files
-            TYMED(TYMED_HGLOBAL.0), // Then try HGlobal
-            TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0), // Finally try both
         ];
+        
+        if enable_storage {
+            tymed_options.push(TYMED(TYMED_ISTORAGE.0)); // Add IStorage if enabled
+        }
+        
+        tymed_options.extend([
+            TYMED(TYMED_HGLOBAL.0), // Then try HGlobal
+            TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0 | if enable_storage { TYMED_ISTORAGE.0 } else { 0 }), // Finally try combination
+        ]);
         
         for (attempt, tymed) in tymed_options.iter().enumerate() {
             let format_etc = make_format_with_tymed_index(
@@ -1025,9 +1143,21 @@ impl PlatformDataReader {
                             let size = GlobalSize(hglobal);
                             log::debug!("HGlobal medium size: {} bytes", size);
                             
+                            // If we have an expected size and this is zero, and we haven't tried all options yet
                             if size == 0 {
-                                log::warn!("HGlobal has zero size - may be invalid");
-                                continue;
+                                if let Some(expected) = descriptor.expected_size {
+                                    if expected > 0 && attempt < tymed_options.len() - 1 {
+                                        log::warn!("Expected {} bytes but got 0 in HGLOBAL; retrying with next TYMED", expected);
+                                        continue;
+                                    }
+                                }
+                                // If this is our last attempt or no size hint, warn but continue
+                                if attempt == tymed_options.len() - 1 {
+                                    log::warn!("HGlobal has zero size on final attempt - may be invalid but proceeding");
+                                } else {
+                                    log::warn!("HGlobal has zero size - trying next TYMED option");
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -1374,12 +1504,24 @@ fn mime_to_windows(fmt: String) -> String {
         "image/jpeg" => "JFIF".to_string(),
         "image/gif" => "GIF".to_string(),
         "image/tiff" => format_to_string(CF_TIFF.0 as u32),
+        "application/vnd.ms-outlook" => "application/vnd.ms-outlook".to_string(),
+        "message/rfc822" => "message/rfc822".to_string(),
         _ => fmt,
     }
 }
 
 fn mime_from_name(name: &str) -> String {
     let ext = Path::new(name).extension();
+    
+    // Handle common Outlook file extensions explicitly
+    if let Some(ext_str) = ext.and_then(|e| e.to_str()) {
+        match ext_str.to_ascii_lowercase().as_str() {
+            "msg" => return "application/vnd.ms-outlook".to_string(),
+            "eml" => return "message/rfc822".to_string(),
+            _ => {}
+        }
+    }
+    
     mime_guess::from_path(name)
         .first()
         .map(|m| m.to_string())
