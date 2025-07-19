@@ -742,36 +742,37 @@ impl PlatformDataReader {
             TYMED_ISTREAM => {
                 log::debug!("Processing TYMED_ISTREAM for file '{}'", file_name);
                 match unsafe { medium.u.pstm.as_ref() } {
-                Some(stream) => {
-                    if supports_async {
-                        let copier = AsyncVirtualStreamCopier {
-                            sender: RunLoop::current().new_sender(),
-                            stream: unsafe { Movable::new(stream.clone()) },
-                            file_name: file_name.into(),
-                            target_folder,
-                            progress,
-                            completer: Capsule::new(completer),
-                        };
-                        thread::spawn(move || {
-                            copier.copy();
-                        });
-                    } else {
-                        let path = get_target_path(&target_folder, file_name);
-                        unsafe { stream.Seek(0, STREAM_SEEK_SET, None).ok_log() };
-                        let res = copy_stream_to_file(stream, &path);
-                        progress.report_progress(Some(1.0));
-                        match res {
-                            Ok(_) => completer.complete(Ok(path)),
-                            Err(err) => completer.complete(Err(
-                                NativeExtensionsError::VirtualFileReceiveError(err.to_string()),
-                            )),
+                    Some(stream) => {
+                        if supports_async {
+                            let copier = AsyncVirtualStreamCopier {
+                                sender: RunLoop::current().new_sender(),
+                                stream: unsafe { Movable::new(stream.clone()) },
+                                file_name: file_name.into(),
+                                target_folder,
+                                progress,
+                                completer: Capsule::new(completer),
+                            };
+                            thread::spawn(move || {
+                                copier.copy();
+                            });
+                        } else {
+                            let path = get_target_path(&target_folder, file_name);
+                            unsafe { stream.Seek(0, STREAM_SEEK_SET, None).ok_log() };
+                            let res = copy_stream_to_file(stream, &path);
+                            progress.report_progress(Some(1.0));
+                            match res {
+                                Ok(_) => completer.complete(Ok(path)),
+                                Err(err) => completer.complete(Err(
+                                    NativeExtensionsError::VirtualFileReceiveError(err.to_string()),
+                                )),
+                            }
                         }
                     }
+                    None => completer.complete(Err(NativeExtensionsError::VirtualFileReceiveError(
+                        "IStream missing".into(),
+                    ))),
                 }
-                None => completer.complete(Err(NativeExtensionsError::VirtualFileReceiveError(
-                    "IStream missing".into(),
-                ))),
-            },
+            }
             _ => completer.complete(Err(NativeExtensionsError::VirtualFileReceiveError(
                 "unsupported data format (unexpected tymed)".into(),
             ))),
