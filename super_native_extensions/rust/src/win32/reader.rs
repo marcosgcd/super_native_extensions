@@ -249,7 +249,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 1");
+        log::warn!("current version 2");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -277,6 +277,28 @@ impl PlatformDataReader {
         let has_file_contents = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
         log::warn!("Has CFSTR_FILECONTENTS: {}", has_file_contents);
         
+        // Check for additional content formats that might indicate email data
+        let content_format_checks = [
+            "text/plain",
+            "text/html", 
+            "message/rfc822",
+            "application/vnd.ms-outlook",
+            "NativeShell_CF_15", // This appeared in the logs - might be Outlook-specific
+        ];
+        
+        let has_content_formats: Vec<&str> = content_format_checks
+            .iter()
+            .filter(|&format| {
+                let cf_format = unsafe { RegisterClipboardFormatW(HSTRING::from(*format).as_wide().as_ptr()) };
+                self.data_object.has_data(cf_format)
+            })
+            .copied()
+            .collect();
+            
+        if !has_content_formats.is_empty() {
+            log::warn!("*** DETECTED CONTENT FORMATS: {:?} ***", has_content_formats);
+        }
+        
         // Additional Outlook-specific format checks
         let outlook_formats = [
             "RenPrivateMessages",
@@ -303,13 +325,20 @@ impl PlatformDataReader {
         let fallback_name = if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
             log::warn!("Detected Chromium/web browser source - but user is dragging from Outlook desktop");
             // Since user is dragging from Outlook but we're seeing web browser formats,
-            // this might be Outlook using internal web rendering. Check if FILECONTENTS suggests email.
-            if has_file_contents {
-                log::warn!("Outlook with web rendering + FILECONTENTS - creating .eml file for email drag");
+            // this might be Outlook using internal web rendering.
+            
+            // Check for any content that might suggest email data
+            let has_email_indicators = has_file_contents 
+                || !has_content_formats.is_empty()
+                || format_strings.iter().any(|f| f.contains("NativeShell_CF_15")) // This was in the logs
+                || format_strings.iter().any(|f| f.contains("text/") || f.contains("html"));
+                
+            if has_email_indicators {
+                log::warn!("Outlook with web rendering + potential email content - creating .eml file for email drag");
                 "outlook_email.eml"
             } else {
-                log::warn!("Outlook with web rendering but no FILECONTENTS - creating .tmp file");
-                "outlook_content.tmp"
+                log::warn!("Outlook with web rendering but no clear email indicators - still creating .eml since user said Outlook");
+                "outlook_email.eml" // Default to .eml for Outlook drags even without clear indicators
             }
         } else if format_strings.iter().any(|f| f.contains("FILECONTENTS")) {
             log::debug!("Detected FILECONTENTS format - checking for email message drag");
@@ -326,6 +355,14 @@ impl PlatformDataReader {
             "outlook_email.eml"
         } else if format_strings.iter().any(|f| f.contains("PNG") || f.contains("JFIF") || f.contains("GIF")) {
             log::debug!("Detected image format - generating image fallback name");
+            "image.tmp"
+        } else if format_strings.iter().any(|f| f.contains("TEXT") || f.contains("Unicode")) {
+            log::debug!("Detected text format - generating text fallback name");
+            "text_content.txt"
+        } else {
+            log::debug!("No specific format detected - since user is dragging from Outlook, defaulting to email");
+            "outlook_email.eml"
+        }; image format - generating image fallback name");
             "image.tmp"
         } else if format_strings.iter().any(|f| f.contains("TEXT") || f.contains("Unicode")) {
             log::debug!("Detected text format - generating text fallback name");
