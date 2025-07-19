@@ -362,17 +362,9 @@ impl PlatformDataReader {
         } else {
             log::debug!("No specific format detected - since user is dragging from Outlook, defaulting to email");
             "outlook_email.eml"
-        }; image format - generating image fallback name");
-            "image.tmp"
-        } else if format_strings.iter().any(|f| f.contains("TEXT") || f.contains("Unicode")) {
-            log::debug!("Detected text format - generating text fallback name");
-            "text_content.txt"
-        } else {
-            log::debug!("No specific format detected - since user is dragging from Outlook, defaulting to email");
-            "outlook_email.eml"
         };
         
-        log::warn!("No file name could be determined for item {}, using fallback: '{}'", item, fallback_name);
+        log::warn!("No file name could be determined for item {}, using fallback: \"{}\"", item, fallback_name);
         Ok(Some(fallback_name.to_string()))
     }
 
