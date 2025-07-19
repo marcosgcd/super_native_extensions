@@ -135,9 +135,16 @@ impl PlatformDataReader {
                                 }
                             })
                             .collect();
+                        let format_names: Vec<String> = filtered_formats.iter().map(|f| format_to_string(*f)).collect();
                         log::debug!("Filtered to {} compatible formats: {:?}", 
                                    filtered_formats.len(), 
-                                   filtered_formats.iter().map(|f| format_to_string(*f)).collect::<Vec<_>>());
+                                   format_names);
+                        
+                        // Log if we detect Outlook email message patterns
+                        if format_names.iter().any(|f| f.contains("RenPrivateMessages") || f.contains("FileGroupDescriptor")) {
+                            log::debug!("*** DETECTED OUTLOOK EMAIL MESSAGE DRAG PATTERN ***");
+                        }
+                        
                         filtered_formats
                     }
                     Err(err) => {
@@ -260,8 +267,38 @@ impl PlatformDataReader {
             log::debug!("No hdrop found for item {}", item);
         }
         
-        log::warn!("No file name could be determined for item {}, returning None", item);
-        Ok(None)
+        // Check available formats to determine appropriate fallback name
+        let formats = self.data_object_formats_raw()?;
+        let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
+        log::debug!("Available formats for fallback naming: {:?}", format_strings);
+        
+        // Generate fallback name based on available formats
+        let fallback_name = if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
+            log::debug!("Detected Chromium/web browser source - generating web fallback name");
+            "web_download.tmp"
+        } else if format_strings.iter().any(|f| f.contains("FILECONTENTS")) {
+            log::debug!("Detected FILECONTENTS format - checking for email message drag");
+            // Check if this might be an email message from Outlook
+            if format_strings.iter().any(|f| f.contains("RenPrivateMessages") || f.contains("CF_HDROP") || f.contains("FileGroupDescriptor")) {
+                log::debug!("Detected email message drag from Outlook - generating .eml fallback name");
+                "outlook_message.eml"
+            } else {
+                log::debug!("Detected generic attachment fallback name");
+                "attachment.tmp"
+            }
+        } else if format_strings.iter().any(|f| f.contains("PNG") || f.contains("JFIF") || f.contains("GIF")) {
+            log::debug!("Detected image format - generating image fallback name");
+            "image.tmp"
+        } else if format_strings.iter().any(|f| f.contains("TEXT") || f.contains("Unicode")) {
+            log::debug!("Detected text format - generating text fallback name");
+            "text_content.txt"
+        } else {
+            log::debug!("No specific format detected - generating generic fallback name");
+            "dropped_item.tmp"
+        };
+        
+        log::warn!("No file name could be determined for item {}, using fallback: '{}'", item, fallback_name);
+        Ok(Some(fallback_name.to_string()))
     }
 
     async fn generate_png(&self) -> NativeExtensionsResult<Vec<u8>> {
@@ -521,14 +558,29 @@ impl PlatformDataReader {
                                 Some(descriptors)
                             }
                             None => {
-                                log::warn!("Failed to read file descriptor data from memory - may indicate email client issue");
+                                log::warn!("Failed to read file descriptor data from memory - may indicate web browser or email client issue");
                                 // Create fallback descriptor to allow attempts at content retrieval
+                                // Check formats to determine appropriate fallback name
+                                let formats = self.data_object_formats_raw().unwrap_or_default();
+                                let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
+                                
+                                let (fallback_name, fallback_format) = if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
+                                    log::debug!("Detected web browser source - creating web download fallback");
+                                    ("web_download.tmp", "application/octet-stream")
+                                } else if format_strings.iter().any(|f| f.contains("RenPrivateMessages") || f.contains("FileGroupDescriptor")) {
+                                    log::debug!("Detected email message drag from Outlook - creating .eml fallback");
+                                    ("outlook_message.eml", "message/rfc822")
+                                } else {
+                                    log::debug!("Creating generic attachment fallback");
+                                    ("attachment.tmp", "application/octet-stream")
+                                };
+                                
                                 let fallback_descriptor = FileDescriptor {
-                                    name: "email_attachment.tmp".to_string(),
-                                    format: "application/octet-stream".to_string(),
+                                    name: fallback_name.to_string(),
+                                    format: fallback_format.to_string(),
                                     index: 0,
                                 };
-                                log::debug!("Created fallback file descriptor: {:?}", fallback_descriptor.name);
+                                log::debug!("Created fallback file descriptor: name='{}', format='{}'", fallback_descriptor.name, fallback_descriptor.format);
                                 Some(vec![fallback_descriptor])
                             }
                         }
@@ -541,15 +593,32 @@ impl PlatformDataReader {
             } else {
                 log::debug!("Data object does not have file descriptor format");
                 
-                // Check if we have CFSTR_FILECONTENTS without descriptors (common with email clients)
+                // Check if we have CFSTR_FILECONTENTS without descriptors (common with email clients and web browsers)
                 let file_contents_format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
                 if self.data_object.has_data(file_contents_format) {
                     log::debug!("Found CFSTR_FILECONTENTS without descriptors - creating fallback descriptor");
+                    
+                    // Check available formats to determine source type for better naming
+                    let formats = self.data_object_formats_raw().unwrap_or_default();
+                    let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
+                    
+                    let (fallback_name, fallback_format) = if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
+                        log::debug!("Detected web browser source without descriptors");
+                        ("web_download.tmp", "application/octet-stream")
+                    } else if format_strings.iter().any(|f| f.contains("RenPrivateMessages") || f.contains("FileGroupDescriptor")) {
+                        log::debug!("Detected email message drag from Outlook without descriptors");
+                        ("outlook_message.eml", "message/rfc822")
+                    } else {
+                        log::debug!("Detected file content without descriptors (possibly email attachment)");
+                        ("attachment.tmp", "application/octet-stream")
+                    };
+                    
                     let fallback_descriptor = FileDescriptor {
-                        name: "email_attachment.tmp".to_string(),
-                        format: "application/octet-stream".to_string(),
+                        name: fallback_name.to_string(),
+                        format: fallback_format.to_string(),
                         index: 0,
                     };
+                    log::debug!("Created fallback descriptor for orphaned content: name='{}', format='{}'", fallback_descriptor.name, fallback_descriptor.format);
                     Some(vec![fallback_descriptor])
                 } else {
                     log::debug!("No file content formats found");
@@ -613,7 +682,9 @@ impl PlatformDataReader {
                 // Handle empty or corrupted filenames
                 let name = if name.trim().is_empty() {
                     log::warn!("Empty filename for virtual file at index {}, generating fallback", index);
-                    format!("email_attachment_{}.tmp", index)
+                    // Try to determine if this is an email message based on context
+                    // (we don't have format strings here, so we use a generic email fallback)
+                    format!("outlook_message_{}.eml", index)
                 } else {
                     name
                 };
@@ -855,6 +926,8 @@ impl PlatformDataReader {
         descriptor: &FileDescriptor,
     ) -> NativeExtensionsResult<STGMEDIUM> {
         let format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
+        log::debug!("Attempting to get virtual file content for '{}' at index {} using format {}", 
+                   descriptor.name, descriptor.index, format);
         
         // Try different TYMED combinations in order of preference
         let tymed_options = [
@@ -877,6 +950,21 @@ impl PlatformDataReader {
                 Some(medium) => {
                     log::debug!("Successfully got medium with TYMED {:?} for file '{}' at index {}", 
                                tymed.0, descriptor.name, descriptor.index);
+                    
+                    // Additional validation for HGlobal mediums
+                    if TYMED(medium.tymed as i32) == TYMED_HGLOBAL {
+                        unsafe {
+                            let hglobal = medium.u.hGlobal;
+                            let size = GlobalSize(hglobal);
+                            log::debug!("HGlobal medium size: {} bytes", size);
+                            
+                            if size == 0 {
+                                log::warn!("HGlobal has zero size - may be invalid");
+                                continue;
+                            }
+                        }
+                    }
+                    
                     return Ok(medium);
                 }
                 None => {
