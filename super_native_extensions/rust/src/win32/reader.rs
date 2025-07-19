@@ -201,7 +201,42 @@ impl PlatformDataReader {
                 .map(|f| format_to_string(*f))
                 .collect();
             log::debug!("Item 0 formats from data object: {:?}", format_strings);
-            format_strings
+            
+            // For Outlook web content, add email-specific formats that we can synthesize
+            if self.probably_outlook_message()? {
+                let mut outlook_formats = format_strings.clone();
+                
+                // Add email formats that we can create from the available content
+                if !outlook_formats.contains(&"message/rfc822".to_string()) {
+                    outlook_formats.push("message/rfc822".to_string());
+                    log::debug!("Added message/rfc822 format for Outlook email");
+                }
+                
+                if !outlook_formats.contains(&"application/vnd.ms-outlook".to_string()) {
+                    outlook_formats.push("application/vnd.ms-outlook".to_string());
+                    log::debug!("Added application/vnd.ms-outlook format for Outlook email");
+                }
+                
+                // Add text formats if we have text content
+                if self.data_object.has_data(CF_UNICODETEXT.0 as u32) {
+                    if !outlook_formats.contains(&"text/plain".to_string()) {
+                        outlook_formats.push("text/plain".to_string());
+                        log::debug!("Added text/plain format for Outlook email text");
+                    }
+                }
+                
+                let html_format = unsafe { RegisterClipboardFormatW(w!("text/html")) };
+                if self.data_object.has_data(html_format) {
+                    if !outlook_formats.contains(&"text/html".to_string()) {
+                        outlook_formats.push("text/html".to_string());
+                        log::debug!("Added text/html format for Outlook email HTML");
+                    }
+                }
+                
+                outlook_formats
+            } else {
+                format_strings
+            }
         } else if item > 0 {
             let hdrop_len = self.with_hdrop(|h| Ok(h.map(|f| f.len()).unwrap_or(0)))?;
             if item < hdrop_len as i64 {
@@ -246,7 +281,14 @@ impl PlatformDataReader {
         if let Some(descriptor) = self.descriptor_for_item(item)? {
             Ok(descriptor.format == format)
         } else {
-            Ok(false)
+            // For Outlook web format emails, we can synthesize EML/MSG files even without descriptors
+            if self.probably_outlook_message()? && 
+               (format.contains("message/") || format.contains("application/")) {
+                log::debug!("Can synthesize email file for Outlook web format: {}", format);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
     }
 
@@ -262,7 +304,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 4 - Enhanced Outlook Support");
+        log::warn!("current version 5 - Enhanced Outlook Web Support with Content Extraction");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -274,9 +316,9 @@ impl PlatformDataReader {
                 if !name.to_ascii_lowercase().ends_with(".msg") && 
                    !name.to_ascii_lowercase().ends_with(".eml") &&
                    !name.contains('.') {
-                    // For Outlook messages without extension, prefer .msg for storage support
-                    name.push_str(".msg");
-                    log::debug!("Added .msg extension for Outlook message: '{}'", name);
+                    // For Outlook messages without extension, prefer .eml for better compatibility
+                    name.push_str(".eml");
+                    log::debug!("Added .eml extension for Outlook message: '{}'", name);
                 }
             }
             
@@ -303,13 +345,14 @@ impl PlatformDataReader {
         let has_file_contents = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
         log::warn!("Has CFSTR_FILECONTENTS: {}", has_file_contents);
         
-        // Check for additional content formats that might indicate email data
+        // Enhanced content format detection for Outlook web
         let content_format_checks = [
             "text/plain",
             "text/html", 
             "message/rfc822",
             "application/vnd.ms-outlook",
             "NativeShell_CF_15", // This appeared in the logs - might be Outlook-specific
+            "Chromium Web Custom MIME Data Format", // Outlook web format
         ];
         
         let has_content_formats: Vec<&str> = content_format_checks
@@ -317,7 +360,11 @@ impl PlatformDataReader {
             .filter(|&format| {
                 let hstring = HSTRING::from(*format);
                 let cf_format = unsafe { RegisterClipboardFormatW(&hstring) };
-                self.data_object.has_data(cf_format)
+                let has_format = self.data_object.has_data(cf_format);
+                if has_format {
+                    log::warn!("*** FOUND CONTENT FORMAT: {} ***", format);
+                }
+                has_format
             })
             .copied()
             .collect();
@@ -326,10 +373,58 @@ impl PlatformDataReader {
             log::warn!("*** DETECTED CONTENT FORMATS: {:?} ***", has_content_formats);
         }
         
+        // Check if we can actually extract text content
+        let has_extractable_content = self.has_outlook_web_email_content().unwrap_or(false);
+        log::warn!("Has extractable email content: {}", has_extractable_content);
+        
+        // Check for FILECONTENTS explicitly
+        let has_file_contents = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
+        log::warn!("Has CFSTR_FILECONTENTS: {}", has_file_contents);
+        
+        // Enhanced content format detection for Outlook web
+        let content_format_checks = [
+            "text/plain",
+            "text/html", 
+            "message/rfc822",
+            "application/vnd.ms-outlook",
+            "NativeShell_CF_15", // This appeared in the logs - might be Outlook-specific
+            "Chromium Web Custom MIME Data Format", // Outlook web format
+        ];
+        
+        let has_content_formats: Vec<&str> = content_format_checks
+            .iter()
+            .filter(|&format| {
+                let hstring = HSTRING::from(*format);
+                let cf_format = unsafe { RegisterClipboardFormatW(&hstring) };
+                let has_format = self.data_object.has_data(cf_format);
+                if has_format {
+                    log::warn!("*** FOUND CONTENT FORMAT: {} ***", format);
+                }
+                has_format
+            })
+            .copied()
+            .collect();
+            
+        if !has_content_formats.is_empty() {
+            log::warn!("*** DETECTED CONTENT FORMATS: {:?} ***", has_content_formats);
+        }
+        
+        // Check if we can actually extract text content
+        let has_extractable_content = self.has_outlook_web_email_content().unwrap_or(false);
+        log::warn!("Has extractable email content: {}", has_extractable_content);
+        
         // Generate fallback name based on available formats and Outlook detection
         let fallback_name = if self.probably_outlook_message()? {
-            log::warn!("Detected Outlook message - creating .msg file for potential storage support");
-            "outlook_message.msg"
+            log::warn!("Detected Outlook message - creating .eml file for better compatibility");
+            // Check if we have HTML content to determine the best extension
+            let html_format = unsafe { RegisterClipboardFormatW(w!("text/html")) };
+            if self.data_object.has_data(html_format) {
+                "outlook_email.eml" // EML handles HTML content better than MSG
+            } else if has_extractable_content {
+                "outlook_email.eml" // We can extract content, use EML
+            } else {
+                "outlook_message.eml" // Use EML for broader compatibility
+            }
         } else if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
             log::warn!("Detected Chromium/web browser source - but user is dragging from Outlook desktop");
             // Since user is dragging from Outlook but we're seeing web browser formats,
@@ -339,28 +434,30 @@ impl PlatformDataReader {
             let has_email_indicators = has_file_contents 
                 || !has_content_formats.is_empty()
                 || format_strings.iter().any(|f| f.contains("NativeShell_CF_15")) // This was in the logs
-                || format_strings.iter().any(|f| f.contains("text/") || f.contains("html"));
+                || format_strings.iter().any(|f| f.contains("text/") || f.contains("html"))
+                || self.data_object.has_data(CF_UNICODETEXT.0 as u32)
+                || has_extractable_content;
                 
             if has_email_indicators {
-                log::warn!("Outlook with web rendering + potential email content - creating .msg file for email drag");
-                "outlook_email.msg"
+                log::warn!("Outlook with web rendering + email content detected - creating .eml file");
+                "outlook_email.eml"
             } else {
-                log::warn!("Outlook with web rendering but no clear email indicators - still creating .msg since user said Outlook");
-                "outlook_email.msg" // Default to .msg for Outlook drags even without clear indicators
+                log::warn!("Outlook with web rendering but unclear content - defaulting to .eml since user said Outlook");
+                "outlook_email.eml" // Default to .eml for Outlook drags for better compatibility
             }
         } else if format_strings.iter().any(|f| f.contains("FILECONTENTS")) {
             log::debug!("Detected FILECONTENTS format - checking for email message drag");
             // Check if this might be an email message from Outlook
             if format_strings.iter().any(|f| f.contains("RenPrivateMessages") || f.contains("CF_HDROP") || f.contains("FileGroupDescriptor")) {
-                log::debug!("Detected email message drag from Outlook - generating .msg fallback name");
-                "outlook_message.msg"
+                log::debug!("Detected email message drag from Outlook - generating .eml fallback name");
+                "outlook_message.eml"
             } else {
                 log::debug!("FILECONTENTS without clear Outlook indicators - assuming email since user said Outlook");
-                "outlook_email.msg"
+                "outlook_email.eml"
             }
         } else if has_file_contents {
             log::warn!("Has FILECONTENTS but no clear format indicators - since user is dragging from Outlook, assuming email");
-            "outlook_email.msg"
+            "outlook_email.eml"
         } else if format_strings.iter().any(|f| f.contains("PNG") || f.contains("JFIF") || f.contains("GIF")) {
             log::debug!("Detected image format - generating image fallback name");
             "image.tmp"
@@ -369,7 +466,7 @@ impl PlatformDataReader {
             "text_content.txt"
         } else {
             log::debug!("No specific format detected - since user is dragging from Outlook, defaulting to email");
-            "outlook_email.msg"
+            "outlook_email.eml"
         };
         
         log::warn!("No file name could be determined for item {}, using fallback: \"{}\"", item, fallback_name);
@@ -468,6 +565,9 @@ impl PlatformDataReader {
     ) -> NativeExtensionsResult<Value> {
         let format = format_from_string(&data_type);
         let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
+        
+        log::debug!("Getting data for item {} with format '{}' ({})", item, data_type, format);
+        
         if format == CF_HDROP.0 as u32 {
             let hdrop = self.hdrop_for_item(item)?;
             if let Some(hdrop) = hdrop {
@@ -503,6 +603,7 @@ impl PlatformDataReader {
                                         data.truncate(terminator * 2);
                                     }
                                 }
+                                log::debug!("Successfully retrieved {} bytes for format {}", data.len(), format);
                                 Ok(data.into())
                             }
                             None => {
@@ -513,14 +614,195 @@ impl PlatformDataReader {
                     }
                     None => {
                         log::debug!("Format {} not available from data object", format);
+                        // For Outlook web formats, try to extract email content from available formats
+                        if self.probably_outlook_message()? {
+                            log::debug!("Attempting to extract email content from Outlook web formats");
+                            return self.try_extract_outlook_web_content(&data_type).await;
+                        }
                         Ok(Value::Null)
                     }
                 }
             } else {
-                // possibly virtual
+                // possibly virtual or special format
+                if self.probably_outlook_message()? {
+                    log::debug!("Format {} not in standard list, trying Outlook web content extraction", format);
+                    return self.try_extract_outlook_web_content(&data_type).await;
+                }
                 Ok(Value::Null)
             }
         }
+    }
+    
+    /// Try to extract email content from Outlook's web-based formats
+    async fn try_extract_outlook_web_content(&self, requested_format: &str) -> NativeExtensionsResult<Value> {
+        log::debug!("Attempting to extract Outlook web content for format: {}", requested_format);
+        
+        // If requesting a file format like application/octet-stream, try to create an email file
+        if requested_format.contains("application/") || requested_format.contains("message/") {
+            return self.create_outlook_email_file().await;
+        }
+        
+        // Try to get text content first (this is most likely to work)
+        let text_formats = [
+            ("text/plain", CF_UNICODETEXT.0 as u32),
+            ("text/html", unsafe { RegisterClipboardFormatW(w!("text/html")) }),
+            ("text/plain", unsafe { RegisterClipboardFormatW(w!("text/plain")) }),
+        ];
+        
+        for (format_name, format_id) in &text_formats {
+            if requested_format.contains(format_name) || requested_format == "text/plain" {
+                if self.data_object.has_data(*format_id) {
+                    let format_etc = make_format_with_tymed(*format_id, TYMED(TYMED_HGLOBAL.0));
+                    if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                        let data = unsafe {
+                            let hglobal = medium.u.hGlobal;
+                            safe_slice_from_global_memory(hglobal)
+                        };
+                        
+                        unsafe {
+                            ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                        }
+                        
+                        if let Some(mut data) = data {
+                            // Handle Unicode text null termination
+                            if *format_id == CF_UNICODETEXT.0 as u32 {
+                                let terminator = data.chunks(2).position(|c| c == [0; 2]);
+                                if let Some(terminator) = terminator {
+                                    data.truncate(terminator * 2);
+                                }
+                            }
+                            log::debug!("Successfully extracted {} bytes of {} content", data.len(), format_name);
+                            return Ok(data.into());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Try custom Outlook formats
+        let custom_formats = [
+            "NativeShell_CF_15",
+            "Chromium Web Custom MIME Data Format",
+        ];
+        
+        for custom_format in &custom_formats {
+            let format_id = unsafe { RegisterClipboardFormatW(&HSTRING::from(*custom_format)) };
+            if self.data_object.has_data(format_id) {
+                let format_etc = make_format_with_tymed(format_id, TYMED(TYMED_HGLOBAL.0));
+                if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                    let data = unsafe {
+                        let hglobal = medium.u.hGlobal;
+                        safe_slice_from_global_memory(hglobal)
+                    };
+                    
+                    unsafe {
+                        ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                    }
+                    
+                    if let Some(data) = data {
+                        log::debug!("Successfully extracted {} bytes from custom format {}", data.len(), custom_format);
+                        return Ok(data.into());
+                    }
+                }
+            }
+        }
+        
+        log::debug!("Could not extract content for format {}", requested_format);
+        Ok(Value::Null)
+    }
+    
+    /// Create an email file from available Outlook web content
+    async fn create_outlook_email_file(&self) -> NativeExtensionsResult<Value> {
+        log::debug!("Creating email file from Outlook web content");
+        
+        // Try to get HTML content first (most structured)
+        let html_format = unsafe { RegisterClipboardFormatW(w!("text/html")) };
+        if self.data_object.has_data(html_format) {
+            let format_etc = make_format_with_tymed(html_format, TYMED(TYMED_HGLOBAL.0));
+            if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                let data = unsafe {
+                    let hglobal = medium.u.hGlobal;
+                    safe_slice_from_global_memory(hglobal)
+                };
+                
+                unsafe {
+                    ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                }
+                
+                if let Some(html_data) = data {
+                    log::debug!("Found {} bytes of HTML content for email", html_data.len());
+                    
+                    // Create a simple EML file with HTML content
+                    let eml_content = self.create_eml_from_html(&html_data);
+                    return Ok(eml_content.into());
+                }
+            }
+        }
+        
+        // Fall back to plain text
+        if self.data_object.has_data(CF_UNICODETEXT.0 as u32) {
+            let format_etc = make_format_with_tymed(CF_UNICODETEXT.0 as u32, TYMED(TYMED_HGLOBAL.0));
+            if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                let data = unsafe {
+                    let hglobal = medium.u.hGlobal;
+                    safe_slice_from_global_memory(hglobal)
+                };
+                
+                unsafe {
+                    ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                }
+                
+                if let Some(mut text_data) = data {
+                    // Handle Unicode null termination
+                    let terminator = text_data.chunks(2).position(|c| c == [0; 2]);
+                    if let Some(terminator) = terminator {
+                        text_data.truncate(terminator * 2);
+                    }
+                    
+                    log::debug!("Found {} bytes of text content for email", text_data.len());
+                    
+                    // Convert UTF-16 to UTF-8 and create EML
+                    if let Ok(text) = String::from_utf16(text_data.as_slice_of::<u16>().unwrap_or(&[])) {
+                        let eml_content = self.create_eml_from_text(&text);
+                        return Ok(eml_content.into());
+                    }
+                }
+            }
+        }
+        
+        log::warn!("Could not extract any email content - creating minimal EML file");
+        // Create minimal EML file as last resort
+        let minimal_eml = b"Subject: Outlook Email (Extracted)\r\nFrom: outlook@example.com\r\nTo: user@example.com\r\n\r\nThis email was extracted from Outlook using the web rendering engine.\r\nThe original content could not be fully retrieved.\r\n".to_vec();
+        Ok(minimal_eml.into())
+    }
+    
+    /// Create EML content from HTML data
+    fn create_eml_from_html(&self, html_data: &[u8]) -> Vec<u8> {
+        let html_str = String::from_utf8_lossy(html_data);
+        let eml_content = format!(
+            "Subject: Outlook Email (HTML)\r\n\
+             From: outlook@example.com\r\n\
+             To: user@example.com\r\n\
+             Content-Type: text/html; charset=utf-8\r\n\
+             \r\n\
+             {}",
+            html_str
+        );
+        eml_content.into_bytes()
+    }
+    
+    /// Create EML content from plain text
+    fn create_eml_from_text(&self, text: &str) -> Vec<u8> {
+        let eml_content = format!(
+            "Subject: Outlook Email (Text)\r\n\
+             From: outlook@example.com\r\n\
+             To: user@example.com\r\n\
+             Content-Type: text/plain; charset=utf-8\r\n\
+             \r\n\
+             {}",
+            text
+        );
+        eml_content.into_bytes()
     }
 
     pub fn new_with_data_object(
@@ -709,13 +991,102 @@ impl PlatformDataReader {
     fn probably_outlook_message(&self) -> NativeExtensionsResult<bool> {
         let formats = self.data_object_formats_raw()?;
         let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
-        Ok(format_strings.iter().any(|f| {
+        
+        // Traditional Outlook email formats
+        let traditional_outlook = format_strings.iter().any(|f| {
             f.contains("FileGroupDescriptor") || 
             f.contains("RenPrivateMessages") || 
             f.contains("FileContents") ||
             f.contains("message/rfc822") ||
             f.contains("application/vnd.ms-outlook")
-        }))
+        });
+        
+        // Modern Outlook with web rendering engine - look for specific patterns
+        let modern_outlook_web = format_strings.iter().any(|f| {
+            f.contains("NativeShell_CF_15") ||  // Outlook-specific native format
+            f.contains("Chromium Web Custom MIME Data Format") // Modern Outlook uses Chromium
+        }) && format_strings.iter().any(|f| {
+            f.contains("DragContext") ||  // Indicates structured drag operation
+            f.contains("DragImageBits")   // Indicates email with visual preview
+        });
+        
+        // Additional check for Outlook web formats containing email data
+        let outlook_web_with_content = format_strings.iter().any(|f| f.contains("chromium")) && 
+            self.has_outlook_web_email_content()?;
+        
+        let result = traditional_outlook || modern_outlook_web || outlook_web_with_content;
+        
+        if result {
+            log::warn!("Detected Outlook message: traditional={}, modern_web={}, web_with_content={}", 
+                      traditional_outlook, modern_outlook_web, outlook_web_with_content);
+        }
+        
+        Ok(result)
+    }
+    
+    /// Check if Outlook web formats contain actual email content
+    fn has_outlook_web_email_content(&self) -> NativeExtensionsResult<bool> {
+        // Check for text content that might be email body
+        let text_formats = [
+            CF_UNICODETEXT.0 as u32,
+            unsafe { RegisterClipboardFormatW(w!("text/plain")) },
+            unsafe { RegisterClipboardFormatW(w!("text/html")) },
+        ];
+        
+        for &format in &text_formats {
+            if self.data_object.has_data(format) {
+                let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
+                if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                    let data = unsafe {
+                        let hglobal = medium.u.hGlobal;
+                        safe_slice_from_global_memory(hglobal)
+                    };
+                    
+                    unsafe {
+                        ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                    }
+                    
+                    if let Some(data) = data {
+                        if data.len() > 100 { // Reasonable threshold for email content
+                            log::debug!("Found {} bytes of text content in format {}", data.len(), format);
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check for custom Outlook web formats that might contain structured data
+        let custom_formats = [
+            "NativeShell_CF_15",
+            "Chromium Web Custom MIME Data Format",
+        ];
+        
+        for format_name in &custom_formats {
+            let format = unsafe { RegisterClipboardFormatW(&HSTRING::from(*format_name)) };
+            if self.data_object.has_data(format) {
+                let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
+                if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                    let data = unsafe {
+                        let hglobal = medium.u.hGlobal;
+                        safe_slice_from_global_memory(hglobal)
+                    };
+                    
+                    unsafe {
+                        ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                    }
+                    
+                    if let Some(data) = data {
+                        log::debug!("Found {} bytes in custom format {}", data.len(), format_name);
+                        if data.len() > 50 { // Some threshold for meaningful data
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(false)
     }
 
     fn extract_file_descriptors(buffer: Vec<u8>) -> NativeExtensionsResult<Vec<FileDescriptor>> {
@@ -1170,25 +1541,72 @@ impl PlatformDataReader {
     pub async fn copy_virtual_file_for_item(
         &self,
         item: i64,
-        _format: &str,
+        format: &str,
         target_folder: PathBuf,
         progress: Arc<ReadProgress>,
     ) -> NativeExtensionsResult<PathBuf> {
-        let descriptor = self.descriptor_for_virtual_file(item)?;
-        let mut medium = self.medium_for_virtual_file(&descriptor)?;
-        unsafe {
-            let (future, completer) = FutureCompleter::new();
-            Self::do_copy_virtual_file(
-                &medium,
-                &descriptor.name,
-                target_folder,
-                progress,
-                self.supports_async.get(),
-                completer,
-            );
-            ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
-            future.await
+        // First try the traditional virtual file approach
+        if let Ok(descriptor) = self.descriptor_for_virtual_file(item) {
+            let mut medium = self.medium_for_virtual_file(&descriptor)?;
+            unsafe {
+                let (future, completer) = FutureCompleter::new();
+                Self::do_copy_virtual_file(
+                    &medium,
+                    &descriptor.name,
+                    target_folder,
+                    progress,
+                    self.supports_async.get(),
+                    completer,
+                );
+                ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                return future.await;
+            }
         }
+        
+        // If no traditional virtual file, try to create email file from Outlook web content
+        if self.probably_outlook_message()? && 
+           (format.contains("message/") || format.contains("application/")) {
+            log::debug!("Creating email file from Outlook web content for format: {}", format);
+            return self.copy_outlook_web_email_file(target_folder, progress).await;
+        }
+        
+        // Fall back to error
+        Err(NativeExtensionsError::VirtualFileReceiveError(
+            "item not found and cannot synthesize email content".into(),
+        ))
+    }
+    
+    /// Copy Outlook web email content to a file
+    async fn copy_outlook_web_email_file(
+        &self,
+        target_folder: PathBuf,
+        progress: Arc<ReadProgress>,
+    ) -> NativeExtensionsResult<PathBuf> {
+        log::debug!("Creating Outlook web email file");
+        
+        // Get the suggested name for this file
+        let suggested_name = self.get_suggested_name_for_item(0).await?
+            .unwrap_or_else(|| "outlook_email.eml".to_string());
+        
+        let target_path = get_target_path(&target_folder, &suggested_name);
+        
+        // Create the email content
+        let email_content = self.create_outlook_email_file().await?;
+        let content_bytes = match email_content {
+            Value::List(bytes) => bytes.into_iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect(),
+            _ => Vec::new(),
+        };
+        
+        if content_bytes.is_empty() {
+            log::warn!("No email content could be extracted - creating empty email file");
+            fs::write(&target_path, b"Subject: Empty Outlook Email\r\nFrom: outlook@example.com\r\nTo: user@example.com\r\n\r\nNo content could be extracted from this Outlook email.\r\n")?;
+        } else {
+            log::debug!("Writing {} bytes of email content to {}", content_bytes.len(), target_path.display());
+            fs::write(&target_path, &content_bytes)?;
+        }
+        
+        progress.report_progress(Some(1.0));
+        Ok(target_path)
     }
 }
 
