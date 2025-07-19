@@ -249,6 +249,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
+        log::warn!("current version 1");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -270,12 +271,46 @@ impl PlatformDataReader {
         // Check available formats to determine appropriate fallback name
         let formats = self.data_object_formats_raw()?;
         let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
-        log::debug!("Available formats for fallback naming: {:?}", format_strings);
+        log::warn!("Available formats for fallback naming: {:?}", format_strings);
+        
+        // Check for FILECONTENTS explicitly
+        let has_file_contents = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
+        log::warn!("Has CFSTR_FILECONTENTS: {}", has_file_contents);
+        
+        // Additional Outlook-specific format checks
+        let outlook_formats = [
+            "RenPrivateMessages",
+            "RenPrivateItem", 
+            "Outlook Message",
+            "FileGroupDescriptor",
+            "FileGroupDescriptorW",
+            "FileContents",
+        ];
+        
+        let detected_outlook_formats: Vec<&str> = outlook_formats
+            .iter()
+            .filter(|&format| format_strings.iter().any(|f| f.contains(format)))
+            .copied()
+            .collect();
+            
+        if !detected_outlook_formats.is_empty() {
+            log::warn!("*** DETECTED OUTLOOK-SPECIFIC FORMATS: {:?} ***", detected_outlook_formats);
+        } else {
+            log::warn!("*** NO OUTLOOK-SPECIFIC FORMATS DETECTED - This might indicate modern Outlook using web rendering ***");
+        }
         
         // Generate fallback name based on available formats
         let fallback_name = if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
-            log::debug!("Detected Chromium/web browser source - generating web fallback name");
-            "web_download.tmp"
+            log::warn!("Detected Chromium/web browser source - but user is dragging from Outlook desktop");
+            // Since user is dragging from Outlook but we're seeing web browser formats,
+            // this might be Outlook using internal web rendering. Check if FILECONTENTS suggests email.
+            if has_file_contents {
+                log::warn!("Outlook with web rendering + FILECONTENTS - creating .eml file for email drag");
+                "outlook_email.eml"
+            } else {
+                log::warn!("Outlook with web rendering but no FILECONTENTS - creating .tmp file");
+                "outlook_content.tmp"
+            }
         } else if format_strings.iter().any(|f| f.contains("FILECONTENTS")) {
             log::debug!("Detected FILECONTENTS format - checking for email message drag");
             // Check if this might be an email message from Outlook
@@ -283,9 +318,12 @@ impl PlatformDataReader {
                 log::debug!("Detected email message drag from Outlook - generating .eml fallback name");
                 "outlook_message.eml"
             } else {
-                log::debug!("Detected generic attachment fallback name");
-                "attachment.tmp"
+                log::debug!("FILECONTENTS without clear Outlook indicators - assuming email since user said Outlook");
+                "outlook_email.eml"
             }
+        } else if has_file_contents {
+            log::warn!("Has FILECONTENTS but no clear format indicators - since user is dragging from Outlook, assuming email");
+            "outlook_email.eml"
         } else if format_strings.iter().any(|f| f.contains("PNG") || f.contains("JFIF") || f.contains("GIF")) {
             log::debug!("Detected image format - generating image fallback name");
             "image.tmp"
@@ -293,8 +331,8 @@ impl PlatformDataReader {
             log::debug!("Detected text format - generating text fallback name");
             "text_content.txt"
         } else {
-            log::debug!("No specific format detected - generating generic fallback name");
-            "dropped_item.tmp"
+            log::debug!("No specific format detected - since user is dragging from Outlook, defaulting to email");
+            "outlook_email.eml"
         };
         
         log::warn!("No file name could be determined for item {}, using fallback: '{}'", item, fallback_name);
