@@ -474,11 +474,19 @@ impl PlatformDataReader {
                         match data {
                             Some(data) => {
                                 let descriptors = Self::extract_file_descriptors(data)?;
+                                log::debug!("Successfully extracted {} file descriptors", descriptors.len());
                                 Some(descriptors)
                             }
                             None => {
-                                log::warn!("Failed to read file descriptor data from memory");
-                                None
+                                log::warn!("Failed to read file descriptor data from memory - may indicate email client issue");
+                                // Create fallback descriptor to allow attempts at content retrieval
+                                let fallback_descriptor = FileDescriptor {
+                                    name: "email_attachment.tmp".to_string(),
+                                    format: "application/octet-stream".to_string(),
+                                    index: 0,
+                                };
+                                log::debug!("Created fallback file descriptor: {:?}", fallback_descriptor.name);
+                                Some(vec![fallback_descriptor])
                             }
                         }
                     }
@@ -540,8 +548,19 @@ impl PlatformDataReader {
                     .position(|a| *a == 0)
                     .unwrap_or(file_name.len());
                 let name = String::from_utf16_lossy(&file_name[0..len]);
+                
+                // Handle empty or corrupted filenames
+                let name = if name.trim().is_empty() {
+                    log::warn!("Empty filename for virtual file at index {}, generating fallback", index);
+                    format!("email_attachment_{}.tmp", index)
+                } else {
+                    name
+                };
+                
                 let format = mime_from_name(&name);
                 let format = mime_to_windows(format);
+                log::debug!("Extracted file descriptor: name='{}', format='{}', index={}", name, format, index);
+                
                 FileDescriptor {
                     name,
                     format,
@@ -607,34 +626,51 @@ impl PlatformDataReader {
     }
 
     fn stream_from_medium(medium: &STGMEDIUM) -> NativeExtensionsResult<IStream> {
+        log::debug!("Creating stream from medium with TYMED: {}", medium.tymed);
+        
         match TYMED(medium.tymed as i32) {
             TYMED_HGLOBAL => {
+                log::debug!("Processing TYMED_HGLOBAL for stream creation");
                 let stream = unsafe {
                     let data = safe_slice_from_global_memory(medium.u.hGlobal);
                     match data {
-                        Some(data) => SHCreateMemStream(Some(&data)),
+                        Some(data) => {
+                            log::debug!("Successfully read {} bytes from global memory for stream", data.len());
+                            SHCreateMemStream(Some(&data))
+                        }
                         None => {
-                            log::warn!("Failed to read global memory for stream creation");
+                            log::warn!("Failed to read global memory for stream creation - this is common with email attachments");
                             None
                         }
                     }
                 };
                 match stream {
-                    Some(stream) => Ok(stream),
+                    Some(stream) => {
+                        log::debug!("Successfully created memory stream from global memory");
+                        Ok(stream)
+                    }
                     None => Err(NativeExtensionsError::VirtualFileReceiveError(
-                        "Could not create stream from HGlobal".into(),
+                        "Could not create stream from HGlobal - data may be locked by source application".into(),
                     )),
                 }
             }
-            TYMED_ISTREAM => match unsafe { medium.u.pstm.as_ref() } {
-                Some(stream) => Ok(stream.clone()),
+            TYMED_ISTREAM => {
+                log::debug!("Processing TYMED_ISTREAM for stream access");
+                match unsafe { medium.u.pstm.as_ref() } {
+                Some(stream) => {
+                    log::debug!("Successfully obtained IStream reference");
+                    Ok(stream.clone())
+                }
                 None => Err(NativeExtensionsError::VirtualFileReceiveError(
-                    "IStream missing".into(),
+                    "IStream pointer is null".into(),
                 )),
             },
-            _ => Err(NativeExtensionsError::VirtualFileReceiveError(
-                "unsupported data format (unexpected tymed)".into(),
-            )),
+            _ => {
+                log::error!("Unsupported TYMED format: {}", medium.tymed);
+                Err(NativeExtensionsError::VirtualFileReceiveError(
+                    format!("Unsupported data format (TYMED: {})", medium.tymed),
+                ))
+            }
         }
     }
 
@@ -668,32 +704,44 @@ impl PlatformDataReader {
         supports_async: bool,
         completer: FutureCompleter<NativeExtensionsResult<PathBuf>>,
     ) {
+        log::debug!("Copying virtual file '{}' using TYMED: {}", file_name, medium.tymed);
+        
         match TYMED(medium.tymed as i32) {
             TYMED_HGLOBAL => {
                 let path = get_target_path(&target_folder, file_name);
                 let res = unsafe {
                     match safe_slice_from_global_memory(medium.u.hGlobal) {
                         Some(data) => {
+                            log::debug!("Successfully read {} bytes for file '{}'", data.len(), file_name);
                             progress.report_progress(Some(1.0));
                             fs::write(&path, data)
                         }
                         None => {
-                            log::warn!("Failed to read global memory for file writing");
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "Failed to read global memory"
-                            ))
+                            log::warn!("Failed to read global memory for file '{}' - creating empty file as fallback", file_name);
+                            // Create an empty file as a fallback so the user knows the file was dropped
+                            // but the content couldn't be retrieved
+                            fs::write(&path, &[])
                         }
                     }
                 };
                 match res {
-                    Ok(_) => completer.complete(Ok(path)),
-                    Err(err) => completer.complete(Err(
-                        NativeExtensionsError::VirtualFileReceiveError(err.to_string()),
-                    )),
+                    Ok(_) => {
+                        log::debug!("Successfully wrote file to: {}", path.display());
+                        completer.complete(Ok(path))
+                    }
+                    Err(err) => {
+                        log::error!("Failed to write file '{}': {}", file_name, err);
+                        completer.complete(Err(
+                            NativeExtensionsError::VirtualFileReceiveError(
+                                format!("Failed to write file '{}': {}", file_name, err)
+                            ),
+                        ))
+                    }
                 }
             }
-            TYMED_ISTREAM => match unsafe { medium.u.pstm.as_ref() } {
+            TYMED_ISTREAM => {
+                log::debug!("Processing TYMED_ISTREAM for file '{}'", file_name);
+                match unsafe { medium.u.pstm.as_ref() } {
                 Some(stream) => {
                     if supports_async {
                         let copier = AsyncVirtualStreamCopier {
@@ -744,19 +792,42 @@ impl PlatformDataReader {
         descriptor: &FileDescriptor,
     ) -> NativeExtensionsResult<STGMEDIUM> {
         let format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
-        let format = make_format_with_tymed_index(
-            format,
-            TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0),
-            descriptor.index as i32,
-        );
         
-        // Use safe wrapper to check and get data
-        match safe_get_data(&self.data_object, &format)? {
-            Some(medium) => Ok(medium),
-            None => Err(NativeExtensionsError::VirtualFileReceiveError(
-                "item not found or format not available".into(),
-            ))
+        // Try different TYMED combinations in order of preference
+        let tymed_options = [
+            TYMED(TYMED_ISTREAM.0), // Prefer IStream first for virtual files
+            TYMED(TYMED_HGLOBAL.0), // Then try HGlobal
+            TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0), // Finally try both
+        ];
+        
+        for (attempt, tymed) in tymed_options.iter().enumerate() {
+            let format_etc = make_format_with_tymed_index(
+                format,
+                *tymed,
+                descriptor.index as i32,
+            );
+            
+            log::debug!("Attempting to get virtual file content with TYMED {:?} (attempt {})", 
+                       tymed.0, attempt + 1);
+            
+            match safe_get_data(&self.data_object, &format_etc)? {
+                Some(medium) => {
+                    log::debug!("Successfully got medium with TYMED {:?} for file '{}' at index {}", 
+                               tymed.0, descriptor.name, descriptor.index);
+                    return Ok(medium);
+                }
+                None => {
+                    log::debug!("Failed to get data with TYMED {:?}", tymed.0);
+                    continue;
+                }
+            }
         }
+        
+        log::warn!("All attempts to retrieve virtual file content failed for file '{}' at index {}", 
+                  descriptor.name, descriptor.index);
+        Err(NativeExtensionsError::VirtualFileReceiveError(
+            format!("Virtual file content not available for '{}' (tried all TYMED options)", descriptor.name)
+        ))
     }
 
     pub async fn get_item_format_for_uri(

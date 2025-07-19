@@ -346,23 +346,31 @@ pub fn safe_enum_format_etc(object: &IDataObject) -> windows::core::Result<Vec<F
 /// Returns Some(data) if successful, None if validation fails
 /// Automatically handles GlobalLock/GlobalUnlock lifecycle
 pub unsafe fn safe_slice_from_global_memory(hglobal: windows::Win32::Foundation::HGLOBAL) -> Option<Vec<u8>> {
-    let ptr = GlobalLock(hglobal);
-    if ptr.is_null() {
-        log::warn!("GlobalLock returned null pointer");
+    // Additional validation - check if hglobal is valid
+    if hglobal.is_invalid() {
+        log::warn!("GlobalLock attempted on invalid HGLOBAL handle");
         return None;
     }
     
+    // Check size first to avoid locking empty or invalid memory
     let size = GlobalSize(hglobal);
     if size == 0 {
-        log::debug!("GlobalSize returned 0");
-        GlobalUnlock(hglobal);
+        log::debug!("GlobalSize returned 0 - empty or invalid global memory");
         return None;
     }
     
     // Check if size exceeds isize::MAX (required for slice::from_raw_parts safety)
     if size > isize::MAX as usize {
         log::error!("Global memory size {} exceeds isize::MAX", size);
-        GlobalUnlock(hglobal);
+        return None;
+    }
+    
+    // Try to lock the memory
+    let ptr = GlobalLock(hglobal);
+    if ptr.is_null() {
+        log::warn!("GlobalLock returned null pointer for HGLOBAL with size {}", size);
+        // Some applications provide data that cannot be locked immediately
+        // This is common with virtual files from email clients
         return None;
     }
     
@@ -371,5 +379,6 @@ pub unsafe fn safe_slice_from_global_memory(hglobal: windows::Win32::Foundation:
     let data = slice.to_vec();
     
     GlobalUnlock(hglobal);
+    log::debug!("Successfully read {} bytes from global memory", data.len());
     Some(data)
 }
