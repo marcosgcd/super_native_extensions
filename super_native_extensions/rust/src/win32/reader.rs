@@ -13,7 +13,6 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
-    slice,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -35,7 +34,7 @@ use windows::{
                 TYMED_HGLOBAL, TYMED_ISTREAM,
             },
             DataExchange::RegisterClipboardFormatW,
-            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            Memory::{GlobalSize},
             Ole::{
                 OleGetClipboard, ReleaseStgMedium, CF_DIB, CF_DIBV5, CF_HDROP, CF_TIFF,
                 CF_UNICODETEXT,
@@ -249,7 +248,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 2");
+        log::warn!("current version 3");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -289,7 +288,8 @@ impl PlatformDataReader {
         let has_content_formats: Vec<&str> = content_format_checks
             .iter()
             .filter(|&format| {
-                let cf_format = unsafe { RegisterClipboardFormatW(HSTRING::from(*format).as_wide().as_ptr()) };
+                let hstring = HSTRING::from(*format);
+                let cf_format = unsafe { RegisterClipboardFormatW(&hstring) };
                 self.data_object.has_data(cf_format)
             })
             .copied()
@@ -476,7 +476,7 @@ impl PlatformDataReader {
                 let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0));
                 match safe_get_data(&self.data_object, &format_etc)? {
                     Some(mut medium) => {
-                        let mut data = unsafe { 
+                        let data = unsafe { 
                             let hglobal = medium.u.hGlobal;
                             safe_slice_from_global_memory(hglobal)
                         };
