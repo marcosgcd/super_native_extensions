@@ -30,12 +30,12 @@ use windows::{
                 FILE_ATTRIBUTE_TEMPORARY,
             },
             StructuredStorage::{
-                IStorage, StgCreateDocfile, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE,
+                StgCreateDocfile, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE,
             },
         },
         System::{
             Com::{
-                IDataObject, IStream, STATFLAG_NONAME, STATSTG, STGMEDIUM, STREAM_SEEK_SET, TYMED,
+                IDataObject, IStream, IStorage, STATFLAG_NONAME, STATSTG, STGMEDIUM, STREAM_SEEK_SET, TYMED,
                 TYMED_HGLOBAL, TYMED_ISTREAM, TYMED_ISTORAGE,
             },
             DataExchange::RegisterClipboardFormatW,
