@@ -95,11 +95,18 @@ impl PlatformDataReader {
         let descriptor_len = self.with_file_descriptors(|d| Ok(d.map(|f| f.len()).unwrap_or(0)))?;
         let hdrop_len = self.with_hdrop(|h| Ok(h.map(|f| f.len()).unwrap_or(0)))?;
         let file_len = descriptor_len.max(hdrop_len);
+        
+        log::debug!("Item count calculation: descriptor_len={}, hdrop_len={}, file_len={}", 
+                   descriptor_len, hdrop_len, file_len);
+        
         if file_len > 0 {
+            log::debug!("Found {} items from files", file_len);
             Ok(file_len)
         } else if !self.data_object_formats()?.is_empty() {
+            log::debug!("No files found, but data object has formats - returning 1 item");
             Ok(1)
         } else {
+            log::debug!("No items found");
             Ok(0)
         }
     }
@@ -108,21 +115,31 @@ impl PlatformDataReader {
     fn data_object_formats_raw(&self) -> NativeExtensionsResult<Vec<u32>> {
         let formats = self.formats_raw.clone().take();
         match formats {
-            Some(formats) => Ok(formats),
+            Some(formats) => {
+                log::debug!("Using cached formats: {:?}", formats.iter().map(|f| format_to_string(*f)).collect::<Vec<_>>());
+                Ok(formats)
+            }
             None => {
                 let formats: Vec<u32> = match safe_enum_format_etc(&self.data_object) {
-                    Ok(formats) => formats
-                        .iter()
-                        .filter_map(|f| {
-                            if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
-                                || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
-                            {
-                                Some(f.cfFormat as u32)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect(),
+                    Ok(formats) => {
+                        log::debug!("Extracted {} raw formats from data object", formats.len());
+                        let filtered_formats: Vec<u32> = formats
+                            .iter()
+                            .filter_map(|f| {
+                                if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
+                                    || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
+                                {
+                                    Some(f.cfFormat as u32)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        log::debug!("Filtered to {} compatible formats: {:?}", 
+                                   filtered_formats.len(), 
+                                   filtered_formats.iter().map(|f| format_to_string(*f)).collect::<Vec<_>>());
+                        filtered_formats
+                    }
                     Err(err) => {
                         // If we can't extract formats, return empty list rather than failing
                         // This is common with some data objects that have corrupt format structures
@@ -155,11 +172,16 @@ impl PlatformDataReader {
     }
 
     pub fn get_formats_for_item_sync(&self, item: i64) -> NativeExtensionsResult<Vec<String>> {
+        log::debug!("Getting formats for item {}", item);
+        
         let mut formats = if item == 0 {
-            self.data_object_formats()?
+            let object_formats = self.data_object_formats()?;
+            let format_strings: Vec<String> = object_formats
                 .iter()
                 .map(|f| format_to_string(*f))
-                .collect()
+                .collect();
+            log::debug!("Item 0 formats from data object: {:?}", format_strings);
+            format_strings
         } else if item > 0 {
             let hdrop_len = self.with_hdrop(|h| Ok(h.map(|f| f.len()).unwrap_or(0)))?;
             if item < hdrop_len as i64 {
@@ -172,10 +194,15 @@ impl PlatformDataReader {
         };
 
         if let Some(descriptor) = self.descriptor_for_item(item)? {
+            log::debug!("Found virtual file descriptor for item {}: format='{}', name='{}'", 
+                       item, descriptor.format, descriptor.name);
             // make virtual file highest priority
             formats.insert(0, descriptor.format);
+        } else {
+            log::debug!("No virtual file descriptor found for item {}", item);
         }
 
+        log::debug!("Final formats for item {}: {:?}", item, formats);
         Ok(formats)
     }
 
@@ -215,14 +242,25 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
+        log::debug!("Getting suggested name for item {}", item);
+        
         if let Some(descriptor) = self.descriptor_for_item(item)? {
+            log::debug!("Found virtual file descriptor with name: '{}'", descriptor.name);
             return Ok(Some(descriptor.name));
+        } else {
+            log::debug!("No virtual file descriptor found for item {}", item);
         }
 
         if let Some(hdrop) = self.hdrop_for_item(item)? {
             let path = Path::new(&hdrop);
-            return Ok(path.file_name().map(|f| f.to_string_lossy().to_string()));
+            let file_name = path.file_name().map(|f| f.to_string_lossy().to_string());
+            log::debug!("Found hdrop file name: {:?}", file_name);
+            return Ok(file_name);
+        } else {
+            log::debug!("No hdrop found for item {}", item);
         }
+        
+        log::warn!("No file name could be determined for item {}, returning None", item);
         Ok(None)
     }
 
@@ -458,10 +496,14 @@ impl PlatformDataReader {
     {
         if self.file_descriptors.borrow().is_none() {
             let format = unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) };
+            log::debug!("Checking for file descriptors with format: {}", format);
+            
             let descriptors = if self.data_object.has_data(format) {
+                log::debug!("Data object has file descriptor format");
                 let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
                 match safe_get_data(&self.data_object, &format_etc)? {
                     Some(mut medium) => {
+                        log::debug!("Successfully got file descriptor medium");
                         let data = unsafe {
                             let hglobal = medium.u.hGlobal;
                             safe_slice_from_global_memory(hglobal)
@@ -473,6 +515,7 @@ impl PlatformDataReader {
                         
                         match data {
                             Some(data) => {
+                                log::debug!("Successfully read {} bytes of file descriptor data", data.len());
                                 let descriptors = Self::extract_file_descriptors(data)?;
                                 log::debug!("Successfully extracted {} file descriptors", descriptors.len());
                                 Some(descriptors)
@@ -490,10 +533,28 @@ impl PlatformDataReader {
                             }
                         }
                     }
-                    None => None
+                    None => {
+                        log::debug!("Failed to get file descriptor medium - format not available");
+                        None
+                    }
                 }
             } else {
-                None
+                log::debug!("Data object does not have file descriptor format");
+                
+                // Check if we have CFSTR_FILECONTENTS without descriptors (common with email clients)
+                let file_contents_format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
+                if self.data_object.has_data(file_contents_format) {
+                    log::debug!("Found CFSTR_FILECONTENTS without descriptors - creating fallback descriptor");
+                    let fallback_descriptor = FileDescriptor {
+                        name: "email_attachment.tmp".to_string(),
+                        format: "application/octet-stream".to_string(),
+                        index: 0,
+                    };
+                    Some(vec![fallback_descriptor])
+                } else {
+                    log::debug!("No file content formats found");
+                    None
+                }
             };
             self.file_descriptors.replace(Some(descriptors.clone()));
         }
