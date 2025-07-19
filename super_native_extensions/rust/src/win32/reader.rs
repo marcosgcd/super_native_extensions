@@ -657,14 +657,15 @@ impl PlatformDataReader {
             TYMED_ISTREAM => {
                 log::debug!("Processing TYMED_ISTREAM for stream access");
                 match unsafe { medium.u.pstm.as_ref() } {
-                Some(stream) => {
-                    log::debug!("Successfully obtained IStream reference");
-                    Ok(stream.clone())
+                    Some(stream) => {
+                        log::debug!("Successfully obtained IStream reference");
+                        Ok(stream.clone())
+                    }
+                    None => Err(NativeExtensionsError::VirtualFileReceiveError(
+                        "IStream pointer is null".into(),
+                    )),
                 }
-                None => Err(NativeExtensionsError::VirtualFileReceiveError(
-                    "IStream pointer is null".into(),
-                )),
-            },
+            }
             _ => {
                 log::error!("Unsupported TYMED format: {}", medium.tymed);
                 Err(NativeExtensionsError::VirtualFileReceiveError(
