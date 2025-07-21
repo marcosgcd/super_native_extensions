@@ -24,11 +24,16 @@ use threadpool::ThreadPool;
 use windows::{
     core::{w, HSTRING},
     Win32::{
-        Foundation::S_OK,
+        Foundation::{S_OK, BOOL, HGLOBAL},
         Storage::{
             FileSystem::{
                 SetFileAttributesW, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN,
                 FILE_ATTRIBUTE_TEMPORARY,
+            },
+            StructuredStorage::{
+                CreateILockBytesOnHGlobal, GetHGlobalFromILockBytes,
+                StgCreateDocfileOnILockBytes, ILockBytes, IStorage,
+                STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE,
             },
         },
         System::{
@@ -145,17 +150,18 @@ impl IStorageVirtualFileReader {
                 let storage_ptr = &medium.u.pstg;
                 
                 // Check if we have a valid storage pointer
-                if let Some(ref storage_option) = **storage_ptr {
+                if let Some(storage) = storage_ptr.as_ref().and_then(|p| p.as_ref()) {
                     log::debug!("Got IStorage interface for '{}'", file_name);
                     
-                    // Try to extract the actual .msg file content using raw COM calls
-                    match Self::extract_msg_content_from_raw_storage(file_name) {
-                        Ok(content) => {
-                            log::warn!("*** SUCCESSFULLY EXTRACTED {} BYTES FROM REAL ISTORAGE ***", content.len());
-                            return Ok(content);
+                    // Use the new istorage_to_vec function to extract real .msg content
+                    match istorage_to_vec(storage) {
+                        Ok(buf) => {
+                            log::warn!("*** SUCCESSFULLY EXTRACTED {} BYTES FROM REAL ISTORAGE ***", buf.len());
+                            log::warn!("Received {} bytes from IStorage (.msg)", buf.len());
+                            return Ok(buf);
                         }
                         Err(e) => {
-                            log::error!("Failed to extract from IStorage: {}", e);
+                            log::error!("Failed to convert IStorage: {}", e);
                             log::warn!("Falling back to enhanced placeholder content");
                             return Self::create_enhanced_fallback_content(file_name);
                         }
@@ -343,6 +349,100 @@ impl Drop for IStorageVirtualFileReader {
     }
 }
 
+/// Simple virtual file reader for in-memory data (like extracted .msg files)
+struct MemoryVirtualFileReader {
+    file_name: String,
+    content: Vec<u8>,
+    position: std::sync::Mutex<usize>,
+}
+
+impl MemoryVirtualFileReader {
+    fn new(file_name: String, content: Vec<u8>) -> Self {
+        log::debug!("Created MemoryVirtualFileReader for '{}' with {} bytes", file_name, content.len());
+        Self {
+            file_name,
+            content,
+            position: std::sync::Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl VirtualFileReader for MemoryVirtualFileReader {
+    async fn read_next(&self) -> NativeExtensionsResult<Vec<u8>> {
+        let mut position = self.position.lock().unwrap();
+        
+        if *position >= self.content.len() {
+            log::debug!("MemoryVirtualFileReader: EOF reached, position {} >= content length {}", *position, self.content.len());
+            return Ok(Vec::new()); // EOF
+        }
+        
+        // Read in chunks of 8KB for better streaming performance
+        const CHUNK_SIZE: usize = 8192;
+        let start_pos = *position;
+        let end_pos = std::cmp::min(start_pos + CHUNK_SIZE, self.content.len());
+        
+        let chunk = self.content[start_pos..end_pos].to_vec();
+        *position = end_pos;
+        
+        log::debug!("MemoryVirtualFileReader: Read {} bytes (pos: {} -> {}), remaining: {}", 
+                   chunk.len(), start_pos, end_pos, self.content.len() - end_pos);
+        
+        Ok(chunk)
+    }
+    
+    fn file_size(&self) -> NativeExtensionsResult<Option<i64>> {
+        Ok(Some(self.content.len() as i64))
+    }
+    
+    fn file_name(&self) -> Option<String> {
+        Some(self.file_name.clone())
+    }
+    
+    fn close(&self) -> NativeExtensionsResult<()> {
+        log::debug!("MemoryVirtualFileReader: Closing file '{}'", self.file_name);
+        // Reset position on close for potential reuse
+        *self.position.lock().unwrap() = 0;
+        Ok(())
+    }
+}
+
+/// Convert IStorage to Vec<u8> by copying to in-memory storage and extracting bytes
+fn istorage_to_vec(storage: &IStorage) -> windows::core::Result<Vec<u8>> {
+    unsafe {
+        // 1. Allocate an in-mem HGLOBAL + ILockBytes wrapper
+        let mut ilock: Option<ILockBytes> = None;
+        CreateILockBytesOnHGlobal(HGLOBAL(0), /* fDeleteOnRelease = */ BOOL(1), &mut ilock)?;
+        let ilock = ilock.unwrap();
+
+        // 2. Create a writable IStorage on that ILockBytes
+        let mut mem_storage: Option<IStorage> = None;
+        StgCreateDocfileOnILockBytes(
+            &ilock,
+            STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE,
+            0,
+            &mut mem_storage,
+        )?;
+        let mem_storage = mem_storage.unwrap();
+
+        // 3. Copy the dragged message into our in-mem storage
+        storage.CopyTo(0, std::ptr::null(), std::ptr::null_mut(), &mem_storage)?;
+        mem_storage.Commit(0)?;
+
+        // 4. Extract the raw bytes
+        let mut hglobal = HGLOBAL(0);
+        GetHGlobalFromILockBytes(&ilock, &mut hglobal)?;
+        let size = windows::Win32::System::Memory::GlobalSize(hglobal) as usize;
+        let ptr  = windows::Win32::System::Memory::GlobalLock(hglobal);
+
+        let slice = std::slice::from_raw_parts(ptr.cast::<u8>(), size);
+        let data  = slice.to_vec();
+
+        windows::Win32::System::Memory::GlobalUnlock(hglobal);
+        Ok(data)
+    }
+}
+
 impl PlatformDataReader {
     pub fn get_items_sync(&self) -> NativeExtensionsResult<Vec<i64>> {
         Ok((0..self.item_count()? as i64).collect())
@@ -389,6 +489,7 @@ impl PlatformDataReader {
                             .filter_map(|f| {
                                 if (f.tymed & TYMED_HGLOBAL.0 as u32) != 0
                                     || (f.tymed & TYMED_ISTREAM.0 as u32) != 0
+                                    || (f.tymed & TYMED_ISTORAGE.0 as u32) != 0
                                 {
                                     Some(f.cfFormat as u32)
                                 } else {
@@ -584,7 +685,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 32 - CI compatibility: Removed IUnknown dependency, simplified function signature");
+        log::warn!("current version 33 - REAL .MSG EXTRACTION: Added istorage_to_vec, MemoryVirtualFileReader, full TYMED_ISTORAGE support!");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -830,7 +931,7 @@ impl PlatformDataReader {
         } else {
             let formats = self.data_object_formats()?;
             if formats.contains(&format) {
-                let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0));
+                let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0 | TYMED_ISTORAGE.0));
                 match safe_get_data(&self.data_object, &format_etc)? {
                     Some(mut medium) => {
                         let data = unsafe { 
@@ -1729,9 +1830,30 @@ impl PlatformDataReader {
         // Check if we got TYMED_ISTORAGE - this needs special handling
         if TYMED(medium.tymed as i32) == TYMED_ISTORAGE {
             log::warn!("Got TYMED_ISTORAGE medium for '{}' - this is a compound storage file (.msg)", descriptor.name);
-            log::warn!("Creating enhanced IStorageVirtualFileReader with storage medium");
             
-            // Create a special reader for IStorage compound files with the medium
+            // Extract real .msg content using the new istorage_to_vec function
+            let storage_ptr = unsafe { &medium.u.pstg };
+            if let Some(storage) = unsafe { storage_ptr.as_ref() }.and_then(|p| p.as_ref()) {
+                match istorage_to_vec(storage) {
+                    Ok(buf) => {
+                        log::warn!("Received {} bytes from IStorage (.msg)", buf.len());
+                        let reader = MemoryVirtualFileReader::new(descriptor.name.clone(), buf);
+                        
+                        // Release the medium since we've extracted the data
+                        unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
+                        
+                        return Ok(Some(Rc::new(reader)));
+                    }
+                    Err(e) => {
+                        log::error!("Failed to convert IStorage: {:?}", e);
+                        log::warn!("Falling back to IStorageVirtualFileReader for safety");
+                        // fall back to the placeholder so the drop doesn't crash
+                    }
+                }
+            }
+            
+            // Fallback: Create a special reader for IStorage compound files with the medium
+            log::warn!("Creating fallback IStorageVirtualFileReader with storage medium");
             let reader = IStorageVirtualFileReader::new_with_storage(descriptor.name, Some(medium));
             
             // Note: We pass ownership of the medium to the reader, so don't release it here
