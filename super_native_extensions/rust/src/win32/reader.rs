@@ -337,7 +337,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 18 - Complete HTML Format fix");
+        log::warn!("current version 19 - Focus on Outlook Classic");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1181,7 +1181,7 @@ impl PlatformDataReader {
         let formats = self.data_object_formats_raw()?;
         let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
         
-        // Traditional Outlook email formats
+        // Traditional Outlook email formats - prioritize these
         let traditional_outlook = format_strings.iter().any(|f| {
             f.contains("FileGroupDescriptor") || 
             f.contains("RenPrivateMessages") || 
@@ -1190,7 +1190,13 @@ impl PlatformDataReader {
             f.contains("application/vnd.ms-outlook")
         });
         
-        // Modern Outlook with web rendering engine - look for specific patterns
+        // If we detect traditional Outlook, use that and skip web checks
+        if traditional_outlook {
+            log::warn!("Detected traditional Outlook message - using classic drag-and-drop handling");
+            return Ok(true);
+        }
+        
+        // Only check for modern web-based Outlook if traditional isn't found
         let modern_outlook_web = format_strings.iter().any(|f| {
             f.contains("NativeShell_CF_15") ||  // Outlook-specific native format
             f.contains("Chromium Web Custom MIME Data Format") // Modern Outlook uses Chromium
@@ -1199,15 +1205,11 @@ impl PlatformDataReader {
             f.contains("DragImageBits")   // Indicates email with visual preview
         });
         
-        // Additional check for Outlook web formats containing email data
-        let outlook_web_with_content = format_strings.iter().any(|f| f.contains("chromium")) && 
-            self.has_outlook_web_email_content()?;
-        
-        let result = traditional_outlook || modern_outlook_web || outlook_web_with_content;
+        let result = traditional_outlook || modern_outlook_web;
         
         if result {
-            log::warn!("Detected Outlook message: traditional={}, modern_web={}, web_with_content={}", 
-                      traditional_outlook, modern_outlook_web, outlook_web_with_content);
+            log::warn!("Detected Outlook message: traditional={}, modern_web={}", 
+                      traditional_outlook, modern_outlook_web);
         }
         
         Ok(result)
