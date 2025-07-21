@@ -35,10 +35,10 @@ use windows::{
             Com::{
                 IDataObject, IStream, STATFLAG_NONAME, STATSTG, STGMEDIUM, STGMEDIUM_0, STREAM_SEEK_SET, TYMED,
                 TYMED_HGLOBAL, TYMED_ISTREAM, TYMED_ISTORAGE,
+                STGM, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE,
                 StructuredStorage::{
                     CreateILockBytesOnHGlobal, GetHGlobalFromILockBytes,
                     StgCreateDocfileOnILockBytes, ILockBytes, IStorage,
-                    STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE,
                 },
             },
             DataExchange::RegisterClipboardFormatW,
@@ -147,12 +147,7 @@ impl IStorageVirtualFileReader {
         unsafe {
             if medium.tymed == TYMED_ISTORAGE.0 as u32 {
                 // Get the IStorage interface from the medium
-                let storage_ptr = &medium.u.pstg;
-                
-                // Check if we have a valid storage pointer
-                if !storage_ptr.is_null() {
-                    // SAFETY: storage_ptr came from IDataObject::GetData, lifetime is bound
-                    let storage = unsafe { &**storage_ptr };
+                if let Some(storage) = unsafe { medium.u.pstg.as_ref() } {
                     log::debug!("Got IStorage interface for '{}'", file_name);
                     
                     // Use the new istorage_to_vec function to extract real .msg content
@@ -412,34 +407,28 @@ impl VirtualFileReader for MemoryVirtualFileReader {
 /// Convert IStorage to Vec<u8> by copying to in-memory storage and extracting bytes
 fn istorage_to_vec(storage: &IStorage) -> windows::core::Result<Vec<u8>> {
     unsafe {
-        // 1. Create a grow-as-needed HGLOBAL + ILockBytes wrapper
-        let mut ilock: Option<ILockBytes> = None;
-        CreateILockBytesOnHGlobal(None, BOOL(1), &mut ilock)?;
-        let ilock = ilock.unwrap();
+        // 1. scratch ILockBytes that will grow as needed
+        let ilock = CreateILockBytesOnHGlobal(None, BOOL(1))?;
 
-        // 2. Create an in-memory IStorage on top of that lock-bytes buffer
-        let mut mem_storage: Option<IStorage> = None;
-        StgCreateDocfileOnILockBytes(
+        // 2. in-memory IStorage on top of that lock-bytes buffer
+        let mem_storage = StgCreateDocfileOnILockBytes(
             &ilock,
             STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE,
             0,
-            &mut mem_storage,
         )?;
-        let mem_storage = mem_storage.unwrap();
 
-        // 3. Deep-copy the dragged .msg into the scratch storage
-        storage.CopyTo(0, None, None, &mem_storage)?;
+        // 3. deep-copy the dragged .msg into the scratch store
+        storage.CopyTo(None, None, Some(&mem_storage))?;
         mem_storage.Commit(0)?;
 
-        // 4. Pull the raw bytes out of the underlying HGLOBAL
-        let mut hglobal = HGLOBAL::default();
-        GetHGlobalFromILockBytes(&ilock, &mut hglobal)?;
+        // 4. extract the raw bytes
+        let hglobal: HGLOBAL = GetHGlobalFromILockBytes(&ilock)?;
         let size = GlobalSize(hglobal) as usize;
         let ptr = GlobalLock(hglobal) as *const u8;
-        let data = std::slice::from_raw_parts(ptr, size).to_vec();
+        let bytes = std::slice::from_raw_parts(ptr, size).to_vec();
         GlobalUnlock(hglobal);
 
-        Ok(data)
+        Ok(bytes)
     }
 }
 
@@ -685,7 +674,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 34 - BUILD FIXES: Fixed module paths (Com::StructuredStorage), HGLOBAL(None), removed as_ref() on IStorage");
+        log::warn!("current version 35 - API SIGNATURE FIXES: Updated Windows 0.52 API signatures (STGM flags, CreateILockBytesOnHGlobal return values, CopyTo params, as_ref patterns)");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1832,10 +1821,7 @@ impl PlatformDataReader {
             log::warn!("Got TYMED_ISTORAGE medium for '{}' - this is a compound storage file (.msg)", descriptor.name);
             
             // Extract real .msg content using the new istorage_to_vec function
-            let storage_ptr = unsafe { &medium.u.pstg };
-            if !storage_ptr.is_null() {
-                // SAFETY: storage_ptr came from IDataObject::GetData, lifetime is bound
-                let storage = unsafe { &**storage_ptr };
+            if let Some(storage) = unsafe { medium.u.pstg.as_ref() } {
                 match istorage_to_vec(storage) {
                     Ok(buf) => {
                         log::warn!("Received {} bytes from IStorage (.msg)", buf.len());
