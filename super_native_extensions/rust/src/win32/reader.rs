@@ -33,7 +33,7 @@ use windows::{
         },
         System::{
             Com::{
-                IDataObject, IStream, IUnknown, STATFLAG_NONAME, STATSTG, STGMEDIUM, STGMEDIUM_0, STREAM_SEEK_SET, TYMED,
+                IDataObject, IStream, STATFLAG_NONAME, STATSTG, STGMEDIUM, STGMEDIUM_0, STREAM_SEEK_SET, TYMED,
                 TYMED_HGLOBAL, TYMED_ISTREAM, TYMED_ISTORAGE,
             },
             DataExchange::RegisterClipboardFormatW,
@@ -149,7 +149,7 @@ impl IStorageVirtualFileReader {
                     log::debug!("Got IStorage interface for '{}'", file_name);
                     
                     // Try to extract the actual .msg file content using raw COM calls
-                    match Self::extract_msg_content_from_raw_storage(storage_option, file_name) {
+                    match Self::extract_msg_content_from_raw_storage(file_name) {
                         Ok(content) => {
                             log::warn!("*** SUCCESSFULLY EXTRACTED {} BYTES FROM REAL ISTORAGE ***", content.len());
                             return Ok(content);
@@ -171,7 +171,7 @@ impl IStorageVirtualFileReader {
         }
     }
     
-    fn extract_msg_content_from_raw_storage(storage: &Option<IUnknown>, file_name: &str) -> NativeExtensionsResult<Vec<u8>> {
+    fn extract_msg_content_from_raw_storage(file_name: &str) -> NativeExtensionsResult<Vec<u8>> {
         log::debug!("Extracting MSG content from raw IStorage for '{}'", file_name);
         
         // For now, since the StructuredStorage APIs aren't available in this Windows crate version,
@@ -584,7 +584,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 31 - FINAL CI fix completed: IUnknown import added, pattern matching fixed!");
+        log::warn!("current version 32 - CI compatibility: Removed IUnknown dependency, simplified function signature");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
