@@ -337,7 +337,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 20 - Improved Outlook Classic TYMED handling");
+        log::warn!("current version 21 - Added TYMED_ISTORAGE support for MSG files");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1648,20 +1648,16 @@ impl PlatformDataReader {
         log::debug!("Attempting to get virtual file content for '{}' at index {} using format {}", 
                    descriptor.name, descriptor.index, format);
         
-        // Check if IStorage support is enabled - disabled due to Windows crate API limitations
-        let _enable_storage = false; // Disabled until proper IStorage API becomes available
-        
         // Try different TYMED combinations in order of preference for Outlook Classic
+        // For .msg files, TYMED_ISTORAGE is often required since MSG files are compound storage files
         let mut tymed_options = vec![
             TYMED(TYMED_HGLOBAL.0), // Try HGlobal first for traditional Outlook
             TYMED(TYMED_ISTREAM.0), // Then try IStream
-            TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0), // Then try combination
+            TYMED(TYMED_ISTORAGE.0), // Try IStorage for MSG files (compound storage)
+            TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0), // Then try HGlobal + IStream combination
+            TYMED(TYMED_HGLOBAL.0 | TYMED_ISTORAGE.0), // Try HGlobal + IStorage combination
+            TYMED(TYMED_ISTREAM.0 | TYMED_ISTORAGE.0), // Try IStream + IStorage combination
         ];
-        
-        // IStorage disabled due to missing Windows API bindings
-        // if enable_storage {
-        //     tymed_options.push(TYMED(TYMED_ISTORAGE.0)); // Would add IStorage if available
-        // }
         
         for (attempt, tymed) in tymed_options.iter().enumerate() {
             let format_etc = make_format_with_tymed_index(
@@ -1675,8 +1671,17 @@ impl PlatformDataReader {
             
             match safe_get_data(&self.data_object, &format_etc)? {
                 Some(medium) => {
-                    log::debug!("Successfully got medium with TYMED {:?} for file '{}' at index {}", 
-                               tymed.0, descriptor.name, descriptor.index);
+                    log::warn!("Successfully got medium with TYMED {:?} (got back TYMED: {}) for file '{}' at index {}", 
+                               tymed.0, medium.tymed, descriptor.name, descriptor.index);
+                    
+                    // Check what type of medium we actually got back
+                    let actual_tymed = TYMED(medium.tymed as i32);
+                    if actual_tymed == TYMED_ISTORAGE {
+                        log::warn!("*** GOT TYMED_ISTORAGE MEDIUM - THIS IS WHAT WE NEED FOR MSG FILES ***");
+                        // For TYMED_ISTORAGE, we need to handle it differently since it contains compound storage
+                        // For now, just return it and let the calling code handle the storage
+                        return Ok(medium);
+                    }
                     
                     // Additional validation for HGlobal mediums
                     if TYMED(medium.tymed as i32) == TYMED_HGLOBAL {
