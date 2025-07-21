@@ -371,9 +371,12 @@ impl DataReaderManager {
                     file_size,
                 })
             }
-            None => Err(NativeExtensionsError::VirtualFileReceiveError(
-                "not supported".into(),
-            )),
+            None => {
+                log::warn!("Virtual file reader creation returned None for item {} format '{}' - this usually means compound storage (TYMED_ISTORAGE) files like .msg", request.item_handle, request.format);
+                Err(NativeExtensionsError::VirtualFileReceiveError(
+                    "Virtual file reader not supported - compound storage files require copy operation".into(),
+                ))
+            },
         }
     }
 
