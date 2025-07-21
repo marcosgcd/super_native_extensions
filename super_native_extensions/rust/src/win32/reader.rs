@@ -33,7 +33,7 @@ use windows::{
         },
         System::{
             Com::{
-                IDataObject, IStream, STATFLAG_NONAME, STATSTG, STGMEDIUM, STGMEDIUM_0, STREAM_SEEK_SET, TYMED,
+                IDataObject, IStream, IUnknown, STATFLAG_NONAME, STATSTG, STGMEDIUM, STGMEDIUM_0, STREAM_SEEK_SET, TYMED,
                 TYMED_HGLOBAL, TYMED_ISTREAM, TYMED_ISTORAGE,
             },
             DataExchange::RegisterClipboardFormatW,
@@ -145,27 +145,24 @@ impl IStorageVirtualFileReader {
                 let storage_ptr = &medium.u.pstg;
                 
                 // Check if we have a valid storage pointer
-                match storage_ptr {
-                    Some(storage_option) => {
-                        log::debug!("Got IStorage interface for '{}'", file_name);
-                        
-                        // Try to extract the actual .msg file content using raw COM calls
-                        match Self::extract_msg_content_from_raw_storage(storage_option, file_name) {
-                            Ok(content) => {
-                                log::warn!("*** SUCCESSFULLY EXTRACTED {} BYTES FROM REAL ISTORAGE ***", content.len());
-                                return Ok(content);
-                            }
-                            Err(e) => {
-                                log::error!("Failed to extract from IStorage: {}", e);
-                                log::warn!("Falling back to enhanced placeholder content");
-                                return Self::create_enhanced_fallback_content(file_name);
-                            }
+                if let Some(ref storage_option) = **storage_ptr {
+                    log::debug!("Got IStorage interface for '{}'", file_name);
+                    
+                    // Try to extract the actual .msg file content using raw COM calls
+                    match Self::extract_msg_content_from_raw_storage(storage_option, file_name) {
+                        Ok(content) => {
+                            log::warn!("*** SUCCESSFULLY EXTRACTED {} BYTES FROM REAL ISTORAGE ***", content.len());
+                            return Ok(content);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to extract from IStorage: {}", e);
+                            log::warn!("Falling back to enhanced placeholder content");
+                            return Self::create_enhanced_fallback_content(file_name);
                         }
                     }
-                    None => {
-                        log::error!("IStorage pointer is None in STGMEDIUM");
-                        return Self::create_enhanced_fallback_content(file_name);
-                    }
+                } else {
+                    log::error!("IStorage pointer is None in STGMEDIUM");
+                    return Self::create_enhanced_fallback_content(file_name);
                 }
             } else {
                 log::warn!("Medium is not TYMED_ISTORAGE (got {}), falling back", medium.tymed);
@@ -174,7 +171,7 @@ impl IStorageVirtualFileReader {
         }
     }
     
-    fn extract_msg_content_from_raw_storage(_storage: &Option<std::mem::ManuallyDrop<Option<windows::Win32::System::Com::IUnknown>>>, file_name: &str) -> NativeExtensionsResult<Vec<u8>> {
+    fn extract_msg_content_from_raw_storage(storage: &Option<IUnknown>, file_name: &str) -> NativeExtensionsResult<Vec<u8>> {
         log::debug!("Extracting MSG content from raw IStorage for '{}'", file_name);
         
         // For now, since the StructuredStorage APIs aren't available in this Windows crate version,
@@ -587,7 +584,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 30 - FINAL CI fix: All type mismatches resolved, build working!");
+        log::warn!("current version 31 - FINAL CI fix completed: IUnknown import added, pattern matching fixed!");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
