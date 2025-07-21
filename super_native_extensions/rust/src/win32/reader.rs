@@ -337,7 +337,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 19 - Focus on Outlook Classic");
+        log::warn!("current version 20 - Improved Outlook Classic TYMED handling");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1651,20 +1651,17 @@ impl PlatformDataReader {
         // Check if IStorage support is enabled - disabled due to Windows crate API limitations
         let _enable_storage = false; // Disabled until proper IStorage API becomes available
         
-        // Try different TYMED combinations in order of preference
+        // Try different TYMED combinations in order of preference for Outlook Classic
         let mut tymed_options = vec![
-            TYMED(TYMED_ISTREAM.0), // Prefer IStream first for virtual files
+            TYMED(TYMED_HGLOBAL.0), // Try HGlobal first for traditional Outlook
+            TYMED(TYMED_ISTREAM.0), // Then try IStream
+            TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0), // Then try combination
         ];
         
         // IStorage disabled due to missing Windows API bindings
         // if enable_storage {
         //     tymed_options.push(TYMED(TYMED_ISTORAGE.0)); // Would add IStorage if available
         // }
-        
-        tymed_options.extend([
-            TYMED(TYMED_HGLOBAL.0), // Then try HGlobal
-            TYMED(TYMED_ISTREAM.0 | TYMED_HGLOBAL.0), // Finally try combination without IStorage
-        ]);
         
         for (attempt, tymed) in tymed_options.iter().enumerate() {
             let format_etc = make_format_with_tymed_index(
@@ -1673,8 +1670,8 @@ impl PlatformDataReader {
                 descriptor.index as i32,
             );
             
-            log::debug!("Attempting to get virtual file content with TYMED {:?} (attempt {})", 
-                       tymed.0, attempt + 1);
+            log::warn!("Attempt {}: Trying TYMED {:?} (decimal: {}) for file '{}' at index {}", 
+                       attempt + 1, tymed.0, tymed.0, descriptor.name, descriptor.index);
             
             match safe_get_data(&self.data_object, &format_etc)? {
                 Some(medium) => {
@@ -1718,6 +1715,25 @@ impl PlatformDataReader {
         
         log::warn!("All attempts to retrieve virtual file content failed for file '{}' at index {}", 
                   descriptor.name, descriptor.index);
+        
+        // For traditional Outlook, try alternative approaches
+        if self.probably_outlook_message().unwrap_or(false) {
+            log::warn!("Traditional Outlook detected but CFSTR_FILECONTENTS failed - this may be a locked message");
+            log::warn!("Available format verification:");
+            
+            // Verify the FileContents format is really available
+            let file_contents_format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
+            let has_file_contents = self.data_object.has_data(file_contents_format);
+            log::warn!("CFSTR_FILECONTENTS format available: {}", has_file_contents);
+            
+            // Check if FileGroupDescriptor is available
+            let file_desc_format = unsafe { RegisterClipboardFormatW(&HSTRING::from("FileGroupDescriptor")) };
+            let has_file_desc = self.data_object.has_data(file_desc_format);
+            log::warn!("FileGroupDescriptor format available: {}", has_file_desc);
+            
+            // Check if this might be a permission issue or message is open in Outlook
+            log::warn!("Possible causes: 1) Message is open in Outlook 2) Message is encrypted/protected 3) Permission issue");
+        }
         
         // Try to synthesize email content if this looks like an Outlook email file
         if descriptor.name.ends_with(".eml") && self.probably_outlook_message().unwrap_or(false) {
