@@ -311,7 +311,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 11");
+        log::warn!("current version 12");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -349,8 +349,13 @@ impl PlatformDataReader {
         log::warn!("Available formats for fallback naming: {:?}", format_strings);
         
         // Check for FILECONTENTS explicitly
-        let has_file_contents = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
-        log::warn!("Has CFSTR_FILECONTENTS: {}", has_file_contents);
+        let has_file_contents_native = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
+        let can_synthesize_file_contents = self.probably_outlook_message().unwrap_or(false) && 
+            self.has_outlook_web_email_content().unwrap_or(false);
+        let has_file_contents = has_file_contents_native || can_synthesize_file_contents;
+        
+        log::warn!("Has CFSTR_FILECONTENTS: {} (native: {}, can_synthesize: {})", 
+                  has_file_contents, has_file_contents_native, can_synthesize_file_contents);
         
         // Enhanced content format detection for Outlook web
         let content_format_checks = [
@@ -911,8 +916,15 @@ impl PlatformDataReader {
             // If no descriptors found but we have CFSTR_FILECONTENTS, create fallback
             if descriptors.is_none() {
                 let file_contents_format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
-                if self.data_object.has_data(file_contents_format) {
-                    log::debug!("Found CFSTR_FILECONTENTS without descriptors - creating fallback descriptor");
+                let has_native_file_contents = self.data_object.has_data(file_contents_format);
+                let can_synthesize_file_contents = self.probably_outlook_message().unwrap_or(false);
+                
+                if has_native_file_contents || can_synthesize_file_contents {
+                    if can_synthesize_file_contents && !has_native_file_contents {
+                        log::debug!("No native CFSTR_FILECONTENTS but can synthesize email content - creating fallback descriptor");
+                    } else {
+                        log::debug!("Found CFSTR_FILECONTENTS without descriptors - creating fallback descriptor");
+                    }
                     
                     // Check available formats to determine source type for better naming
                     let formats = self.data_object_formats_raw().unwrap_or_default();
@@ -938,7 +950,7 @@ impl PlatformDataReader {
                     log::debug!("Created fallback descriptor for orphaned content: name='{}', format='{}'", fallback_descriptor.name, fallback_descriptor.format);
                     descriptors = Some(vec![fallback_descriptor]);
                 } else {
-                    log::debug!("No file content formats found");
+                    log::debug!("No file content formats found and cannot synthesize");
                 }
             }
             
