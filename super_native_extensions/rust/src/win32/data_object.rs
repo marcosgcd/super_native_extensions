@@ -22,7 +22,33 @@ use windows::{
             Com::{
                 IAdviseSink, IBindCtx, IDataObject, IDataObject_Impl, IStream, DATADIR_GET,
                 FORMATETC, STGMEDIUM, STGMEDIUM_0, STREAM_SEEK_END, STREAM_SEEK_SET, TYMED,
-                TYMED_HGLOBAL, TYMED_ISTREAM,
+              fn has_data_for_format(&self, format: &FORMATETC) -> bool {
+        unsafe { self.do_query_get_data(format as *const _) == S_OK }
+    }
+
+    fn has_data(&self, format: u32) -> bool {
+        // ── 1. Legacy outlook / shell: lindex = -1, TYMED = HGLOBAL ──────────────
+        if self.has_data_for_format(&make_format_with_tymed(format, TYMED_HGLOBAL)) {
+            return true;
+        }
+
+        // ── 2. Legacy, but TYMED = ISTREAM (some apps) ───────────────────────────
+        if self.has_data_for_format(&make_format_with_tymed(format, TYMED_ISTREAM)) {
+            return true;
+        }
+
+        // ── 3. New Outlook: the file lives at index 0, TYMED = HGLOBAL ───────────
+        if self.has_data_for_format(&make_format_with_tymed_index(format, TYMED_HGLOBAL, 0)) {
+            return true;
+        }
+
+        // ── 4. New Outlook + ISTREAM fallback (rare) ─────────────────────────────
+        if self.has_data_for_format(&make_format_with_tymed_index(format, TYMED_ISTREAM, 0)) {
+            return true;
+        }
+
+        false
+    }, TYMED_ISTREAM,
             },
             DataExchange::RegisterClipboardFormatW,
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GLOBAL_ALLOC_FLAGS},
@@ -785,19 +811,27 @@ pub trait GetData {
     }
 
     fn has_data(&self, format: u32) -> bool {
-        // Outlook (new) stores the single virtual file at lindex = 0,            //
-        // while the "classic" spec uses lindex = -1 (ANY).                       //
-        // We probe BOTH in order: -1 first (legacy), then 0 (new Outlook).       //
-
-        // ❶ legacy probe  (lindex = -1) –––––––––––––––––––––––––––––––––––––––
-        let mut fmt = make_format_with_tymed(format, TYMED_HGLOBAL); // lindex = -1
-        if self.has_data_for_format(&fmt) {
+        // ── 1. Legacy outlook / shell: lindex = -1, TYMED = HGLOBAL ──────────────
+        if self.has_data_for_format(&make_format_with_tymed(format, TYMED_HGLOBAL)) {
             return true;
         }
 
-        // ❷ Outlook-new probe (lindex = 0) –––––––––––––––––––––––––––––––––––––
-        fmt.lindex = 0;
-        self.has_data_for_format(&fmt)
+        // ── 2. Legacy, but TYMED = ISTREAM (some apps) ───────────────────────────
+        if self.has_data_for_format(&make_format_with_tymed(format, TYMED_ISTREAM)) {
+            return true;
+        }
+
+        // ── 3. New Outlook: the file lives at index 0, TYMED = HGLOBAL ───────────
+        if self.has_data_for_format(&make_format_with_tymed_index(format, TYMED_HGLOBAL, 0)) {
+            return true;
+        }
+
+        // ── 4. New Outlook + ISTREAM fallback (rare) ─────────────────────────────
+        if self.has_data_for_format(&make_format_with_tymed_index(format, TYMED_ISTREAM, 0)) {
+            return true;
+        }
+
+        false
     }
 }
 
