@@ -311,7 +311,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 12");
+        log::warn!("current version 13");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -746,6 +746,77 @@ impl PlatformDataReader {
             }
         }
         
+        log::warn!("Could not extract any email content from standard formats - trying custom Outlook formats");
+        
+        // Try custom Outlook web formats that might contain email content
+        let outlook_formats = [
+            "NativeShell_CF_15",
+            "Chromium Web Custom MIME Data Format",
+            "DragContext",
+            "chromium/x-renderer-taint",
+        ];
+        
+        for format_name in &outlook_formats {
+            let format_id = unsafe { RegisterClipboardFormatW(&HSTRING::from(*format_name)) };
+            if self.data_object.has_data(format_id) {
+                log::debug!("Trying to extract email content from format: {}", format_name);
+                let format_etc = make_format_with_tymed(format_id, TYMED(TYMED_HGLOBAL.0));
+                if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                    let data = unsafe {
+                        let hglobal = medium.u.hGlobal;
+                        safe_slice_from_global_memory(hglobal)
+                    };
+                    
+                    unsafe {
+                        ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
+                    }
+                    
+                    if let Some(data) = data {
+                        log::debug!("Found {} bytes in custom format {}", data.len(), format_name);
+                        
+                        // If we find substantial data, try to extract text content
+                        if data.len() > 100 {
+                            // Try to extract as UTF-8 text first
+                            if let Ok(text) = String::from_utf8(data.clone()) {
+                                if text.trim().len() > 50 && !text.chars().all(|c| c.is_control() || c == '\0') {
+                                    log::debug!("Successfully extracted UTF-8 text from {}: {} chars", format_name, text.len());
+                                    let eml_content = self.create_eml_from_text(&text);
+                                    return Ok(eml_content.into());
+                                }
+                            }
+                            
+                            // Try to extract as UTF-16 text
+                            if data.len() >= 2 && data.len() % 2 == 0 {
+                                let utf16_data = unsafe { 
+                                    std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2)
+                                };
+                                if let Ok(text) = String::from_utf16(utf16_data) {
+                                    let cleaned_text = text.trim_matches('\0').trim();
+                                    if cleaned_text.len() > 50 && !cleaned_text.chars().all(|c| c.is_control()) {
+                                        log::debug!("Successfully extracted UTF-16 text from {}: {} chars", format_name, cleaned_text.len());
+                                        let eml_content = self.create_eml_from_text(cleaned_text);
+                                        return Ok(eml_content.into());
+                                    }
+                                }
+                            }
+                            
+                            // If it looks like HTML content, treat it as such
+                            let potential_html = String::from_utf8_lossy(&data).to_string();
+                            let html_lower = potential_html.to_lowercase();
+                            if html_lower.contains("<html") || html_lower.contains("<body") || 
+                               html_lower.contains("<div") || html_lower.contains("<p>") {
+                                log::debug!("Found HTML-like content in {}: {} chars", format_name, potential_html.len());
+                                let eml_content = self.create_eml_from_html(potential_html.as_bytes());
+                                return Ok(eml_content.into());
+                            }
+                        }
+                    }
+                }
+            } else {
+                log::debug!("Format {} not available in data object", format_name);
+            }
+        }
+        
         log::warn!("Could not extract any email content - creating minimal EML file");
         // Create minimal EML file as last resort
         let minimal_eml = b"Subject: Outlook Email (Extracted)\r\nFrom: outlook@example.com\r\nTo: user@example.com\r\n\r\nThis email was extracted from Outlook using the web rendering engine.\r\nThe original content could not be fully retrieved.\r\n".to_vec();
@@ -1043,6 +1114,8 @@ impl PlatformDataReader {
         let custom_formats = [
             "NativeShell_CF_15",
             "Chromium Web Custom MIME Data Format",
+            "DragContext",
+            "chromium/x-renderer-taint",
         ];
         
         for format_name in &custom_formats {
