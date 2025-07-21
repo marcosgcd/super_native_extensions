@@ -123,8 +123,8 @@ impl IStorageVirtualFileReader {
     }
     
     fn new_with_storage(file_name: String, storage_medium: Option<STGMEDIUM>) -> Self {
-        let content = if let Some(medium) = storage_medium {
-            Self::try_extract_from_storage(&file_name, &medium)
+        let content = if let Some(ref medium) = storage_medium {
+            Self::try_extract_from_storage(&file_name, medium)
                 .unwrap_or_else(|_| Self::create_minimal_msg_content(&file_name))
         } else {
             Self::create_minimal_msg_content(&file_name)
@@ -140,7 +140,7 @@ impl IStorageVirtualFileReader {
         }
     }
     
-    fn try_extract_from_storage(file_name: &str, medium: &STGMEDIUM) -> NativeExtensionsResult<Vec<u8>> {
+    fn try_extract_from_storage(file_name: &str, _medium: &STGMEDIUM) -> NativeExtensionsResult<Vec<u8>> {
         // TODO: When Windows crate supports IStorage properly, extract real content here
         // For now, we'll create enhanced placeholder content with better structure
         log::debug!("Attempting to extract content from IStorage for '{}'", file_name);
@@ -512,7 +512,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 26 - Enhanced IStorageVirtualFileReader with proper medium management and improved content");
+        log::warn!("current version 27 - Fixed compilation errors in IStorageVirtualFileReader");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1839,7 +1839,7 @@ impl PlatformDataReader {
         
         // Try different TYMED combinations in order of preference for Outlook Classic
         // For .msg files, TYMED_ISTORAGE is often required since MSG files are compound storage files
-        let mut tymed_options = vec![
+        let tymed_options = vec![
             TYMED(TYMED_HGLOBAL.0), // Try HGlobal first for traditional Outlook
             TYMED(TYMED_ISTREAM.0), // Then try IStream
             TYMED(TYMED_ISTORAGE.0), // Try IStorage for MSG files (compound storage)
