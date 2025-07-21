@@ -226,7 +226,7 @@ impl PlatformDataReader {
                     }
                 }
                 
-                let html_format = unsafe { RegisterClipboardFormatW(w!("text/html")) };
+                let html_format = unsafe { RegisterClipboardFormatW(w!("HTML Format")) };
                 if self.data_object.has_data(html_format) {
                     if !outlook_formats.contains(&"text/html".to_string()) {
                         outlook_formats.push("text/html".to_string());
@@ -311,7 +311,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 16");
+        log::warn!("current version 17 - HTML Format fix");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -393,7 +393,7 @@ impl PlatformDataReader {
         let fallback_name = if self.probably_outlook_message()? {
             log::warn!("Detected Outlook message - creating .eml file for better compatibility");
             // Check if we have HTML content to determine the best extension
-            let html_format = unsafe { RegisterClipboardFormatW(w!("text/html")) };
+            let html_format = unsafe { RegisterClipboardFormatW(w!("HTML Format")) };
             if self.data_object.has_data(html_format) {
                 "outlook_email.eml" // EML handles HTML content better than MSG
             } else if has_extractable_content {
@@ -621,7 +621,7 @@ impl PlatformDataReader {
         // Try to get text content first (this is most likely to work)
         let text_formats = [
             ("text/plain", CF_UNICODETEXT.0 as u32),
-            ("text/html", unsafe { RegisterClipboardFormatW(w!("text/html")) }),
+            ("text/html", unsafe { RegisterClipboardFormatW(w!("HTML Format")) }),
             ("text/plain", unsafe { RegisterClipboardFormatW(w!("text/plain")) }),
         ];
         
@@ -691,9 +691,11 @@ impl PlatformDataReader {
     async fn create_outlook_email_file(&self) -> NativeExtensionsResult<Value> {
         log::debug!("Creating email file from Outlook web content");
         
-        // Try to get HTML content first (most structured)
-        let html_format = unsafe { RegisterClipboardFormatW(w!("text/html")) };
+        // Try to get HTML content first (most structured) - this is the real email content!
+        let html_format = unsafe { RegisterClipboardFormatW(w!("HTML Format")) };
+        log::warn!("Checking for HTML Format clipboard data...");
         if self.data_object.has_data(html_format) {
+            log::warn!("*** FOUND HTML FORMAT - EXTRACTING REAL EMAIL CONTENT ***");
             let format_etc = make_format_with_tymed(html_format, TYMED(TYMED_HGLOBAL.0));
             if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
                 let data = unsafe {
@@ -706,13 +708,17 @@ impl PlatformDataReader {
                 }
                 
                 if let Some(html_data) = data {
-                    log::debug!("Found {} bytes of HTML content for email", html_data.len());
+                    log::warn!("*** SUCCESSFULLY EXTRACTED {} BYTES OF HTML CONTENT ***", html_data.len());
+                    log::warn!("HTML preview (first 300 chars): {}", 
+                              String::from_utf8_lossy(&html_data[..html_data.len().min(300)]));
                     
                     // Create a simple EML file with HTML content
                     let eml_content = self.create_eml_from_html(&html_data);
                     return Ok(eml_content.into());
                 }
             }
+        } else {
+            log::warn!("No HTML Format clipboard data found");
         }
         
         // Fall back to plain text
@@ -1179,7 +1185,7 @@ impl PlatformDataReader {
         let text_formats = [
             CF_UNICODETEXT.0 as u32,
             unsafe { RegisterClipboardFormatW(w!("text/plain")) },
-            unsafe { RegisterClipboardFormatW(w!("text/html")) },
+            unsafe { RegisterClipboardFormatW(w!("HTML Format")) },
         ];
         
         for &format in &text_formats {
