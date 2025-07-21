@@ -785,8 +785,19 @@ pub trait GetData {
     }
 
     fn has_data(&self, format: u32) -> bool {
-        let format = make_format_with_tymed(format, TYMED_HGLOBAL);
-        self.has_data_for_format(&format)
+        // Outlook (new) stores the single virtual file at lindex = 0,            //
+        // while the "classic" spec uses lindex = -1 (ANY).                       //
+        // We probe BOTH in order: -1 first (legacy), then 0 (new Outlook).       //
+
+        // ❶ legacy probe  (lindex = -1) –––––––––––––––––––––––––––––––––––––––
+        let mut fmt = make_format_with_tymed(format, TYMED_HGLOBAL); // lindex = -1
+        if self.has_data_for_format(&fmt) {
+            return true;
+        }
+
+        // ❷ Outlook-new probe (lindex = 0) –––––––––––––––––––––––––––––––––––––
+        fmt.lindex = 0;
+        self.has_data_for_format(&fmt)
     }
 }
 

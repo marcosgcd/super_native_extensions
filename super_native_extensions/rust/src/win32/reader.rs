@@ -233,6 +233,12 @@ impl PlatformDataReader {
                     }
                 }
                 
+                // Move e-mail MIME types to the front so they are tried first.
+                let priority = ["message/rfc822", "application/vnd.ms-outlook"];
+                outlook_formats.sort_by_key(|f| {
+                    if priority.contains(&f.as_str()) { 0 } else { 1 }
+                });
+                
                 outlook_formats
             } else {
                 format_strings
@@ -304,7 +310,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 6 - Enhanced Outlook Web Support with Content Extraction (Fixed Compilation)");
+        log::warn!("current version 8");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
