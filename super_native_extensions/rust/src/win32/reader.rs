@@ -337,7 +337,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 21 - Added TYMED_ISTORAGE support for MSG files");
+        log::warn!("current version 22 - Fixed TYMED_ISTORAGE fallback to copy operation");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1478,6 +1478,15 @@ impl PlatformDataReader {
     ) -> NativeExtensionsResult<Option<Rc<dyn VirtualFileReader>>> {
         let descriptor = self.descriptor_for_virtual_file(item)?;
         let mut medium = self.medium_for_virtual_file(&descriptor).await?;
+        
+        // Check if we got TYMED_ISTORAGE - this needs special handling
+        if TYMED(medium.tymed as i32) == TYMED_ISTORAGE {
+            log::warn!("Got TYMED_ISTORAGE medium for '{}' - cannot create stream reader, falling back to copy operation", descriptor.name);
+            unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
+            // Return None so Flutter will fall back to copy_virtual_file_for_item which can handle IStorage
+            return Ok(None);
+        }
+        
         let stream = Self::stream_from_medium(&medium);
         unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
         let stream = stream?;
