@@ -11,6 +11,7 @@ use std::{
     ffi::CStr,
     fs::{self, File},
     io::Write,
+    mem::ManuallyDrop,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::{
@@ -36,11 +37,11 @@ use windows::{
         },
         System::{
             Com::{
-                IDataObject, IStream, STATFLAG_NONAME, STATSTG, STGMEDIUM, STREAM_SEEK_SET, TYMED,
+                IDataObject, IStream, STATFLAG_NONAME, STATSTG, STGMEDIUM, STGMEDIUM_0, STREAM_SEEK_SET, TYMED,
                 TYMED_HGLOBAL, TYMED_ISTREAM, TYMED_ISTORAGE,
             },
             DataExchange::RegisterClipboardFormatW,
-            Memory::{GlobalSize},
+            Memory::{GlobalSize, GlobalAlloc, GlobalLock, GlobalUnlock, GLOBAL_ALLOC_FLAGS},
             Ole::{
                 OleGetClipboard, ReleaseStgMedium, CF_DIB, CF_DIBV5, CF_HDROP, CF_TIFF,
                 CF_UNICODETEXT,
@@ -310,7 +311,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 10");
+        log::warn!("current version 11");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1248,7 +1249,7 @@ impl PlatformDataReader {
         _progress: Arc<ReadProgress>,
     ) -> NativeExtensionsResult<Option<Rc<dyn VirtualFileReader>>> {
         let descriptor = self.descriptor_for_virtual_file(item)?;
-        let mut medium = self.medium_for_virtual_file(&descriptor)?;
+        let mut medium = self.medium_for_virtual_file(&descriptor).await?;
         let stream = Self::stream_from_medium(&medium);
         unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
         let stream = stream?;
@@ -1411,7 +1412,7 @@ impl PlatformDataReader {
         ))
     }
 
-    fn medium_for_virtual_file(
+    async fn medium_for_virtual_file(
         &self,
         descriptor: &FileDescriptor,
     ) -> NativeExtensionsResult<STGMEDIUM> {
@@ -1489,6 +1490,59 @@ impl PlatformDataReader {
         
         log::warn!("All attempts to retrieve virtual file content failed for file '{}' at index {}", 
                   descriptor.name, descriptor.index);
+        
+        // Try to synthesize email content if this looks like an Outlook email file
+        if descriptor.name.ends_with(".eml") && self.probably_outlook_message().unwrap_or(false) {
+            log::debug!("Attempting to synthesize email content for '{}'", descriptor.name);
+            
+            // Create synthetic email content
+            let email_content_result = self.create_outlook_email_file().await;
+            
+            match email_content_result {
+                Ok(email_value) => {
+                    let content_bytes = match email_value {
+                        Value::U8List(bytes) => bytes,
+                        Value::I8List(bytes) => bytes.into_iter().map(|b| b as u8).collect(),
+                        Value::String(text) => text.into_bytes(),
+                        _ => Vec::new(),
+                    };
+                    
+                    if !content_bytes.is_empty() {
+                        log::debug!("Successfully synthesized {} bytes of email content", content_bytes.len());
+                        
+                        // Create an HGLOBAL medium with the synthesized content
+                        unsafe {
+                            let hglobal = GlobalAlloc(GLOBAL_ALLOC_FLAGS(0), content_bytes.len())?;
+                            if hglobal.is_invalid() {
+                                return Err(NativeExtensionsError::OtherError("Failed to allocate global memory".into()));
+                            }
+                            
+                            let ptr = GlobalLock(hglobal);
+                            if ptr.is_null() {
+                                // GlobalFree(hglobal).ok(); // Note: GlobalFree not available, memory will be released by Windows
+                                return Err(NativeExtensionsError::OtherError("Failed to lock global memory".into()));
+                            }
+                            
+                            std::ptr::copy_nonoverlapping(content_bytes.as_ptr(), ptr as *mut u8, content_bytes.len());
+                            GlobalUnlock(hglobal).ok();
+                            
+                            let medium = STGMEDIUM {
+                                tymed: TYMED_HGLOBAL.0 as u32,
+                                u: STGMEDIUM_0 { hGlobal: hglobal },
+                                pUnkForRelease: ManuallyDrop::new(None),
+                            };
+                            
+                            log::debug!("Created synthetic HGLOBAL medium for email content");
+                            return Ok(medium);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to synthesize email content: {}", e);
+                }
+            }
+        }
+        
         Err(NativeExtensionsError::VirtualFileReceiveError(
             format!("Virtual file content not available for '{}' (tried all TYMED options)", descriptor.name)
         ))
@@ -1517,7 +1571,7 @@ impl PlatformDataReader {
     ) -> NativeExtensionsResult<PathBuf> {
         // First try the traditional virtual file approach
         if let Ok(descriptor) = self.descriptor_for_virtual_file(item) {
-            let mut medium = self.medium_for_virtual_file(&descriptor)?;
+            let mut medium = self.medium_for_virtual_file(&descriptor).await?;
             unsafe {
                 let (future, completer) = FutureCompleter::new();
                 Self::do_copy_virtual_file(
