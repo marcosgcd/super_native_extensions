@@ -102,7 +102,7 @@ struct FileDescriptor {
 struct IStorageVirtualFileReader {
     file_name: String,
     content: Vec<u8>,
-    position: usize,
+    position: std::sync::Mutex<usize>,
 }
 
 impl IStorageVirtualFileReader {
@@ -116,7 +116,7 @@ impl IStorageVirtualFileReader {
         Self {
             file_name,
             content,
-            position: 0,
+            position: std::sync::Mutex::new(0),
         }
     }
     
@@ -145,13 +145,25 @@ impl IStorageVirtualFileReader {
 #[async_trait(?Send)]
 impl VirtualFileReader for IStorageVirtualFileReader {
     async fn read_next(&self) -> NativeExtensionsResult<Vec<u8>> {
-        if self.position >= self.content.len() {
+        let mut position = self.position.lock().unwrap();
+        
+        if *position >= self.content.len() {
+            log::debug!("IStorageVirtualFileReader: EOF reached, position {} >= content length {}", *position, self.content.len());
             return Ok(Vec::new()); // EOF
         }
         
-        // Read remaining content
-        let remaining = &self.content[self.position..];
-        Ok(remaining.to_vec())
+        // Read in chunks of 8KB for better streaming performance
+        const CHUNK_SIZE: usize = 8192;
+        let start_pos = *position;
+        let end_pos = std::cmp::min(start_pos + CHUNK_SIZE, self.content.len());
+        
+        let chunk = self.content[start_pos..end_pos].to_vec();
+        *position = end_pos;
+        
+        log::debug!("IStorageVirtualFileReader: Read {} bytes (pos: {} -> {}), remaining: {}", 
+                   chunk.len(), start_pos, end_pos, self.content.len() - end_pos);
+        
+        Ok(chunk)
     }
     
     fn file_size(&self) -> NativeExtensionsResult<Option<i64>> {
@@ -163,7 +175,9 @@ impl VirtualFileReader for IStorageVirtualFileReader {
     }
     
     fn close(&self) -> NativeExtensionsResult<()> {
-        // Nothing to close for our simple implementation
+        log::debug!("IStorageVirtualFileReader: Closing file '{}'", self.file_name);
+        // Reset position on close for potential reuse
+        *self.position.lock().unwrap() = 0;
         Ok(())
     }
 }
@@ -409,7 +423,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 24 - Added IStorageVirtualFileReader for MSG files");
+        log::warn!("current version 25 - Fixed IStorageVirtualFileReader streaming with proper position tracking");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
