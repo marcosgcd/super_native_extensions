@@ -311,7 +311,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 15");
+        log::warn!("current version 16");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -779,14 +779,16 @@ impl PlatformDataReader {
                             // Try to extract as UTF-8 text first
                             if let Ok(text) = String::from_utf8(data.clone()) {
                                 if text.trim().len() > 50 && !text.chars().all(|c| c.is_control() || c == '\0') {
-                                    log::debug!("Successfully extracted UTF-8 text from {}: {} chars", format_name, text.len());
+                                    log::warn!("Successfully extracted UTF-8 text from {}: {} chars", format_name, text.len());
+                                    log::warn!("Text preview (first 200 chars): {}", &text[..text.len().min(200)]);
                                     
                                     // Check if this looks like Outlook JSON metadata
                                     if text.contains("itemType") && text.contains("maillistrow") {
-                                        log::debug!("Found Outlook JSON metadata, parsing for email info");
+                                        log::warn!("*** FOUND OUTLOOK JSON METADATA - PARSING FOR EMAIL INFO ***");
                                         let eml_content = self.create_eml_from_outlook_json(&text);
                                         return Ok(eml_content.into());
                                     } else {
+                                        log::warn!("Text does not contain Outlook JSON markers, using as plain text");
                                         let eml_content = self.create_eml_from_text(&text);
                                         return Ok(eml_content.into());
                                     }
@@ -862,18 +864,22 @@ impl PlatformDataReader {
     
     /// Create EML content from Outlook JSON metadata
     fn create_eml_from_outlook_json(&self, json_text: &str) -> Vec<u8> {
-        log::debug!("Parsing Outlook JSON metadata for email creation");
+        log::warn!("*** PARSING OUTLOOK JSON METADATA FOR EMAIL CREATION ***");
+        log::warn!("JSON text length: {} chars", json_text.len());
         
         // Extract subject from JSON
         let subject = if let Some(start) = json_text.find("\"subjects\":[\"") {
             let start = start + 12; // length of "\"subjects\":[\""
             if let Some(end) = json_text[start..].find("\"]") {
                 let subject = &json_text[start..start + end];
+                log::warn!("Extracted subject: '{}'", subject);
                 subject.to_string()
             } else {
+                log::warn!("Failed to find end of subjects array");
                 "Outlook Email".to_string()
             }
         } else {
+            log::warn!("No subjects field found in JSON");
             "Outlook Email".to_string()
         };
         
@@ -882,11 +888,14 @@ impl PlatformDataReader {
             let start = start + 22; // length of "\"mailboxSmtpAddress\":\""
             if let Some(end) = json_text[start..].find("\"") {
                 let email = &json_text[start..start + end];
+                log::warn!("Extracted from email: '{}'", email);
                 email.to_string()
             } else {
+                log::warn!("Failed to find end of mailboxSmtpAddress");
                 "outlook@example.com".to_string()
             }
         } else {
+            log::warn!("No mailboxSmtpAddress field found in JSON");
             "outlook@example.com".to_string()
         };
         
@@ -931,8 +940,9 @@ impl PlatformDataReader {
             subject, from_email, to_email, body
         );
         
-        log::debug!("Created EML from Outlook JSON - Subject: '{}', From: '{}', To: '{}'", 
-                   subject, from_email, to_email);
+        log::warn!("*** CREATED EML FROM OUTLOOK JSON ***");
+        log::warn!("Subject: '{}', From: '{}', To: '{}'", subject, from_email, to_email);
+        log::warn!("EML content length: {} bytes", eml_content.len());
         
         eml_content.into_bytes()
     }
