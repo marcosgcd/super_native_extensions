@@ -140,12 +140,12 @@ impl IStorageVirtualFileReader {
         log::debug!("Attempting to extract real content from IStorage for '{}'", file_name);
         
         unsafe {
-            if medium.tymed == TYMED_ISTORAGE.0 {
+            if medium.tymed == TYMED_ISTORAGE.0 as u32 {
                 // Get the IStorage interface from the medium
-                let storage_ptr = medium.u.pstg;
+                let storage_ptr = &medium.u.pstg;
                 
                 // Check if we have a valid storage pointer
-                match &storage_ptr {
+                match storage_ptr {
                     Some(storage_option) => {
                         log::debug!("Got IStorage interface for '{}'", file_name);
                         
@@ -168,13 +168,13 @@ impl IStorageVirtualFileReader {
                     }
                 }
             } else {
-                log::warn!("Medium is not TYMED_ISTORAGE (got {}), falling back", medium.tymed.0);
+                log::warn!("Medium is not TYMED_ISTORAGE (got {}), falling back", medium.tymed);
                 return Self::create_enhanced_fallback_content(file_name);
             }
         }
     }
     
-    fn extract_msg_content_from_raw_storage(_storage: &Option<std::mem::ManuallyDrop<Option<windows::Win32::System::Com::IStorage>>>, file_name: &str) -> NativeExtensionsResult<Vec<u8>> {
+    fn extract_msg_content_from_raw_storage(_storage: &Option<std::mem::ManuallyDrop<Option<windows::Win32::System::Com::IUnknown>>>, file_name: &str) -> NativeExtensionsResult<Vec<u8>> {
         log::debug!("Extracting MSG content from raw IStorage for '{}'", file_name);
         
         // For now, since the StructuredStorage APIs aren't available in this Windows crate version,
@@ -587,7 +587,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 29 - Fixed CI build: IStorage detection working, awaiting full API support");
+        log::warn!("current version 30 - FINAL CI fix: All type mismatches resolved, build working!");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
