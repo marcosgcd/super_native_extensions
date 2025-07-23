@@ -434,68 +434,6 @@ fn istorage_to_vec(storage: &IStorage) -> windows::core::Result<Vec<u8>> {
 
 impl PlatformDataReader {
     pub fn get_items_sync(&self) -> NativeExtensionsResult<Vec<i64>> {
-        // Smart rejection: Check content quality before blocking Outlook New
-        if self.is_outlook_new().unwrap_or(false) {
-            // Check if Outlook New actually has real content this time
-            if self.has_real_msg_content().unwrap_or(false) {
-                log::warn!("*** OUTLOOK NEW WITH REAL CONTENT DETECTED - Allowing drop ***");
-                log::warn!("User likely dropped to desktop first, then re-dragged - .msg content should be genuine");
-            } else {
-                log::error!("*** REJECTING DROP FROM OUTLOOK NEW - NO REAL CONTENT ***");
-                log::error!("Outlook New provides only placeholder content in direct drag-and-drop");
-                log::error!("Try: 1) Use Outlook Classic, or 2) Drop to desktop first, then drag the .msg file");
-                return Err(NativeExtensionsError::OtherError(
-                    "Outlook New direct drag-and-drop not supported (no real content). Use Outlook Classic or drop to desktop first.".into()
-                ));
-            }
-        }
-        
-        // Additional check: Block drops that claim to have files but no proper filenames
-        let has_file_descriptors = self.with_file_descriptors(|descriptors| {
-            if let Some(descriptors) = descriptors {
-                let has_valid_files = descriptors.iter().any(|desc| {
-                    !desc.name.is_empty() && desc.name != "Unknown" && desc.name.contains('.')
-                });
-                log::debug!("File descriptor validation: count={}, has_valid_files={}", descriptors.len(), has_valid_files);
-                Ok(has_valid_files)
-            } else {
-                Ok(false)
-            }
-        }).unwrap_or(false);
-        
-        let has_hdrop = self.with_hdrop(|hdrop| {
-            if let Some(hdrop) = hdrop {
-                let has_valid_files = hdrop.iter().any(|path| {
-                    !path.is_empty() && std::path::Path::new(path).file_name().is_some()
-                });
-                log::debug!("HDROP validation: count={}, has_valid_files={}", hdrop.len(), has_valid_files);
-                Ok(has_valid_files)
-            } else {
-                Ok(false)
-            }
-        }).unwrap_or(false);
-        
-        // If we have file-related formats but no valid filenames, reject the drop
-        let formats = self.data_object_formats_raw()?;
-        let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
-        let claims_to_have_files = format_strings.iter().any(|f| {
-            f.contains("FileGroupDescriptor") || f.contains("FileContents") || f.contains("CF_HDROP")
-        });
-        
-        if claims_to_have_files && !has_file_descriptors && !has_hdrop {
-            log::error!("*** REJECTING DROP - CLAIMS FILES BUT NO VALID FILENAMES ***");
-            log::error!("Available formats suggest files but no valid filenames found");
-            log::error!("This usually indicates a malformed or incomplete drag operation");
-            return Err(NativeExtensionsError::OtherError(
-                "Invalid file drag operation (no valid filenames). Try dragging individual files instead.".into()
-            ));
-        }
-        
-        // Log if we detected Outlook Classic so user knows it's working
-        if self.is_outlook_classic().unwrap_or(false) {
-            log::warn!("*** ACCEPTED DROP FROM OUTLOOK CLASSIC - Real .msg extraction available ***");
-        }
-        
         Ok((0..self.item_count()? as i64).collect())
     }
 
@@ -628,8 +566,8 @@ impl PlatformDataReader {
                 .collect();
             log::debug!("Item 0 formats from data object: {:?}", format_strings);
             
-            // For Outlook web content, add email-specific formats that we can synthesize
-            if self.probably_outlook_message()? {
+            // For web content, add email-specific formats that we can synthesize
+            if true { // Simplified - always check for email formats
                 let mut outlook_formats = format_strings.clone();
                 
                 // Add email formats that we can create from the available content
@@ -713,10 +651,9 @@ impl PlatformDataReader {
         if let Some(descriptor) = self.descriptor_for_item(item)? {
             Ok(descriptor.format == format)
         } else {
-            // For Outlook web format emails, we can synthesize EML/MSG files even without descriptors
-            if self.probably_outlook_message()? && 
-               (format.contains("message/") || format.contains("application/")) {
-                log::debug!("Can synthesize email file for Outlook web format: {}", format);
+            // For web format emails, we can synthesize EML/MSG files even without descriptors
+            if format.contains("message/") || format.contains("application/") {
+                log::debug!("Can synthesize email file for web format: {}", format);
                 Ok(true)
             } else {
                 Ok(false)
@@ -736,22 +673,20 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 40 - FIXED OUTLOOK DETECTION LOGIC: Corrected misidentification of Outlook Classic as Outlook New. Now requires both FileGroupDescriptor AND FileContents for Classic detection, and adds filename validation to block malformed drops.");
+        log::warn!("current version 41 - REMOVED OUTLOOK DETECTION: Removed all Outlook detection logic. File filtering will be handled in Flutter layer.");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
             log::debug!("Found virtual file descriptor with name: '{}'", descriptor.name);
             
-            // If this is likely an Outlook message and we don't have .msg extension, prefer .msg
+            // If this might be an email message and we don't have extension, prefer .eml
             let mut name = descriptor.name.clone();
-            if self.probably_outlook_message()? {
-                if !name.to_ascii_lowercase().ends_with(".msg") && 
-                   !name.to_ascii_lowercase().ends_with(".eml") &&
-                   !name.contains('.') {
-                    // For Outlook messages without extension, prefer .eml for better compatibility
-                    name.push_str(".eml");
-                    log::debug!("Added .eml extension for Outlook message: '{}'", name);
-                }
+            if !name.to_ascii_lowercase().ends_with(".msg") && 
+               !name.to_ascii_lowercase().ends_with(".eml") &&
+               !name.contains('.') {
+                // For messages without extension, prefer .eml for better compatibility
+                name.push_str(".eml");
+                log::debug!("Added .eml extension for email message: '{}'", name);
             }
             
             return Ok(Some(name));
@@ -775,8 +710,7 @@ impl PlatformDataReader {
         
         // Check for FILECONTENTS explicitly
         let has_file_contents_native = self.data_object.has_data(unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) });
-        let can_synthesize_file_contents = self.probably_outlook_message().unwrap_or(false) && 
-            self.has_outlook_web_email_content().unwrap_or(false);
+        let can_synthesize_file_contents = false; // Simplified - no synthesis for now
         let has_file_contents = has_file_contents_native || can_synthesize_file_contents;
         
         log::warn!("Has CFSTR_FILECONTENTS: {} (native: {}, can_synthesize: {})", 
@@ -811,18 +745,18 @@ impl PlatformDataReader {
         }
         
         // Check if we can actually extract text content
-        let has_extractable_content = self.has_outlook_web_email_content().unwrap_or(false);
+        let has_extractable_content = false; // Simplified - no web content extraction for now
         log::warn!("Has extractable email content: {}", has_extractable_content);
         
-        // Generate fallback name based on available formats and Outlook detection
-        let fallback_name = if self.probably_outlook_message()? {
-            log::warn!("Detected Outlook message - creating .eml file for better compatibility");
+        // Generate fallback name based on available formats
+        let fallback_name = if format_strings.iter().any(|f| f.contains("HTML") || f.contains("UNICODETEXT")) {
+            log::warn!("Detected HTML/text content - creating .eml file for email content");
             // Check if we have HTML content to determine the best extension
             let html_format = unsafe { RegisterClipboardFormatW(w!("HTML Format")) };
             if self.data_object.has_data(html_format) {
-                "outlook_email.eml" // EML handles HTML content better than MSG
+                "email.eml" // EML handles HTML content better than MSG
             } else if has_extractable_content {
-                "outlook_email.eml" // We can extract content, use EML
+                "email.eml" // We can extract content, use EML
             } else {
                 "outlook_message.eml" // Use EML for broader compatibility
             }
@@ -857,8 +791,8 @@ impl PlatformDataReader {
                 "outlook_email.eml"
             }
         } else if has_file_contents {
-            log::warn!("Has FILECONTENTS but no clear format indicators - since user is dragging from Outlook, assuming email");
-            "outlook_email.eml"
+            log::warn!("Has FILECONTENTS but no clear format indicators - assuming email content");
+            "email.eml"
         } else if format_strings.iter().any(|f| f.contains("PNG") || f.contains("JFIF") || f.contains("GIF")) {
             log::debug!("Detected image format - generating image fallback name");
             "image.tmp"
@@ -866,8 +800,8 @@ impl PlatformDataReader {
             log::debug!("Detected text format - generating text fallback name");
             "text_content.txt"
         } else {
-            log::debug!("No specific format detected - since user is dragging from Outlook, defaulting to email");
-            "outlook_email.eml"
+            log::debug!("No specific format detected - defaulting to generic content");
+            "content.tmp"
         };
         
         log::warn!("No file name could be determined for item {}, using fallback: \"{}\"", item, fallback_name);
@@ -1015,9 +949,9 @@ impl PlatformDataReader {
                     }
                     None => {
                         log::debug!("Format {} not available from data object", format);
-                        // For Outlook web formats, try to extract email content from available formats
-                        if self.probably_outlook_message()? {
-                            log::debug!("Attempting to extract email content from Outlook web formats");
+                        // For email formats, try to extract content from available formats
+                        if data_type.contains("message/") || data_type.contains("email") {
+                            log::debug!("Attempting to extract email content from web formats");
                             return self.try_extract_outlook_web_content(&data_type).await;
                         }
                         Ok(Value::Null)
@@ -1025,8 +959,8 @@ impl PlatformDataReader {
                 }
             } else {
                 // possibly virtual or special format
-                if self.probably_outlook_message()? {
-                    log::debug!("Format {} not in standard list, trying Outlook web content extraction", format);
+                if data_type.contains("message/") || data_type.contains("email") {
+                    log::debug!("Format {} not in standard list, trying web content extraction", format);
                     return self.try_extract_outlook_web_content(&data_type).await;
                 }
                 Ok(Value::Null)
@@ -1522,11 +1456,11 @@ impl PlatformDataReader {
             if descriptors.is_none() {
                 let file_contents_format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
                 let has_native_file_contents = self.data_object.has_data(file_contents_format);
-                let can_synthesize_file_contents = self.probably_outlook_message().unwrap_or(false);
+                let can_synthesize_file_contents = false; // Simplified - no synthesis
                 
                 if has_native_file_contents || can_synthesize_file_contents {
                     if can_synthesize_file_contents && !has_native_file_contents {
-                        log::debug!("No native CFSTR_FILECONTENTS but can synthesize email content - creating fallback descriptor");
+                        log::debug!("No native CFSTR_FILECONTENTS but can synthesize content - creating fallback descriptor");
                     } else {
                         log::debug!("Found CFSTR_FILECONTENTS without descriptors - creating fallback descriptor");
                     }
@@ -1535,14 +1469,14 @@ impl PlatformDataReader {
                     let formats = self.data_object_formats_raw().unwrap_or_default();
                     let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
                     
-                    let (fallback_name, fallback_format) = if self.probably_outlook_message()? {
-                        log::debug!("Detected Outlook message drag without descriptors");
-                        ("outlook_message.eml", "message/rfc822")
+                    let (fallback_name, fallback_format) = if format_strings.iter().any(|f| f.contains("HTML") || f.contains("message") || f.contains("rfc822")) {
+                        log::debug!("Detected email message drag without descriptors");
+                        ("email_message.eml", "message/rfc822")
                     } else if format_strings.iter().any(|f| f.contains("Chromium") || f.contains("chromium")) {
                         log::debug!("Detected web browser source without descriptors");
                         ("web_download.tmp", "application/octet-stream")
                     } else {
-                        log::debug!("Detected file content without descriptors (possibly email attachment)");
+                        log::debug!("Detected file content without descriptors (possibly attachment)");
                         ("attachment.tmp", "application/octet-stream")
                     };
                     
@@ -1574,295 +1508,6 @@ impl PlatformDataReader {
                 Ok(None)
             }
         })
-    }
-
-    fn probably_outlook_message(&self) -> NativeExtensionsResult<bool> {
-        self.is_outlook_classic().or_else(|_| self.is_outlook_new())
-    }
-    
-    /// Detect Outlook Classic with real compound storage (.msg) files
-    fn is_outlook_classic(&self) -> NativeExtensionsResult<bool> {
-        let formats = self.data_object_formats_raw()?;
-        let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
-        
-        // Check for traditional Outlook Classic file transfer patterns
-        let has_file_descriptors = format_strings.iter().any(|f| {
-            f.contains("FileGroupDescriptor") || f.contains("FileGroupDescriptorW")
-        });
-        
-        let has_file_contents = format_strings.iter().any(|f| {
-            f.contains("FileContents")
-        });
-        
-        let has_storage_formats = format_strings.iter().any(|f| {
-            f.contains("RenPrivateMessages") || 
-            f.contains("message/rfc822") ||
-            f.contains("application/vnd.ms-outlook")
-        });
-        
-        // Check if any formats support TYMED_ISTORAGE (sign of real compound storage)
-        let has_istorage_support = match safe_enum_format_etc(&self.data_object) {
-            Ok(formats) => {
-                formats.iter().any(|f| (f.tymed & TYMED_ISTORAGE.0 as u32) != 0)
-            }
-            Err(_) => false
-        };
-        
-        // Outlook Classic must have BOTH file descriptors AND file contents
-        // This is the key difference from web-based drag operations
-        let is_classic = has_file_descriptors && has_file_contents;
-        
-        if is_classic {
-            log::warn!("*** DETECTED OUTLOOK CLASSIC: file_descriptors={}, file_contents={}, storage_formats={}, istorage_support={} ***", 
-                      has_file_descriptors, has_file_contents, has_storage_formats, has_istorage_support);
-        } else {
-            log::debug!("Not Outlook Classic: file_descriptors={}, file_contents={}, storage_formats={}, istorage_support={}", 
-                       has_file_descriptors, has_file_contents, has_storage_formats, has_istorage_support);
-        }
-        
-        Ok(is_classic)
-    }
-    
-    /// Detect Outlook New (web-based) that only provides placeholder content
-    fn is_outlook_new(&self) -> NativeExtensionsResult<bool> {
-        let formats = self.data_object_formats_raw()?;
-        let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
-        
-        // First check if this is actually Outlook Classic
-        if self.is_outlook_classic().unwrap_or(false) {
-            log::debug!("Not Outlook New - detected as Outlook Classic instead");
-            return Ok(false);
-        }
-        
-        // Modern Outlook New uses web rendering engine patterns
-        let has_chromium_formats = format_strings.iter().any(|f| {
-            f.contains("Chromium Web Custom MIME Data Format") ||
-            f.contains("chromium/x-renderer-taint")
-        });
-        
-        let has_web_indicators = format_strings.iter().any(|f| {
-            f.contains("DragContext") ||
-            f.contains("DragImageBits")
-        });
-        
-        // Key difference: Outlook New should NOT have real file transfer formats
-        let has_real_file_formats = format_strings.iter().any(|f| {
-            f.contains("FileContents") ||
-            f.contains("FileGroupDescriptor")
-        });
-        
-        // Outlook New: has web patterns but NO real file formats
-        let is_new = has_chromium_formats && has_web_indicators && !has_real_file_formats;
-        
-        if is_new {
-            log::warn!("*** DETECTED OUTLOOK NEW (WEB-BASED): chromium={}, web_indicators={}, no_file_formats={} ***", 
-                      has_chromium_formats, has_web_indicators, !has_real_file_formats);
-            log::warn!("Checking if Outlook New has real content this time...");
-        }
-        
-        Ok(is_new)
-    }
-    
-    /// Check if the drag operation has real .msg compound storage content
-    /// This can detect when Outlook New actually provides real files (e.g., after desktop drop)
-    fn has_real_msg_content(&self) -> NativeExtensionsResult<bool> {
-        // Check if any formats support TYMED_ISTORAGE (real compound storage)
-        let has_istorage_formats = match safe_enum_format_etc(&self.data_object) {
-            Ok(formats) => {
-                formats.iter().any(|f| (f.tymed & TYMED_ISTORAGE.0 as u32) != 0)
-            }
-            Err(_) => false
-        };
-        
-        // Check for file descriptors that suggest real files
-        let has_real_file_descriptors = self.with_file_descriptors(|descriptors| {
-            if let Some(descriptors) = descriptors {
-                let has_msg_files = descriptors.iter().any(|desc| {
-                    desc.name.to_lowercase().ends_with(".msg") && desc.expected_size.unwrap_or(0) > 1024
-                });
-                log::debug!("File descriptors analysis: has_msg_files={}, count={}", 
-                           has_msg_files, descriptors.len());
-                Ok(has_msg_files)
-            } else {
-                Ok(false)
-            }
-        }).unwrap_or(false);
-        
-        // CRITICAL: Check if FILECONTENTS actually has real data (not just text/HTML clipboard data)
-        let has_real_filecontents = self.with_file_descriptors(|descriptors| {
-            if let Some(descriptors) = descriptors {
-                for (index, desc) in descriptors.iter().enumerate() {
-                    if desc.name.to_lowercase().ends_with(".msg") {
-                        // Try to get the actual FILECONTENTS to verify it has real data
-                        let format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
-                        let format_etc = make_format_with_tymed_index(
-                            format,
-                            TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0 | TYMED_ISTORAGE.0),
-                            index as i32,
-                        );
-                        
-                        if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
-                            let size = unsafe {
-                                if (medium.tymed & TYMED_HGLOBAL.0 as u32) != 0 {
-                                    GlobalSize(medium.u.hGlobal) as usize
-                                } else if (medium.tymed & TYMED_ISTORAGE.0 as u32) != 0 {
-                                    // IStorage always counts as real content
-                                    log::warn!("Found TYMED_ISTORAGE for .msg file - real content confirmed");
-                                    unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
-                                    return Ok(true);
-                                } else {
-                                    0
-                                }
-                            };
-                            
-                            unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
-                            
-                            // Real .msg files should be at least 4KB
-                            if size > 4096 {
-                                log::warn!("FILECONTENTS has substantial size: {} bytes for {}", size, desc.name);
-                                return Ok(true);
-                            } else {
-                                log::warn!("FILECONTENTS too small: {} bytes for {} - likely Outlook New placeholder", size, desc.name);
-                            }
-                        } else {
-                            log::warn!("Could not get FILECONTENTS for {} - likely Outlook New", desc.name);
-                        }
-                    }
-                }
-            }
-            Ok(false)
-        }).unwrap_or(false);
-        
-        // Check for substantial file content - BUT ONLY from file-related formats, not generic clipboard data
-        let has_substantial_content = self.data_object_formats_raw()
-            .map(|formats| {
-                // Only check file-related formats, not generic clipboard formats like Chromium metadata
-                let file_related_formats = [
-                    unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) },
-                    unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) },
-                    unsafe { RegisterClipboardFormatW(&HSTRING::from(CFSTR_FILEDESCRIPTORW)) },
-                    CF_HDROP.0 as u32,
-                ];
-                
-                formats.iter().any(|&format_id| {
-                    // Only check formats that are actually file-related
-                    if !file_related_formats.contains(&format_id) {
-                        return false;
-                    }
-                    
-                    if self.data_object.has_data(format_id) {
-                        // Try to get the data size to see if it's substantial
-                        let format_etc = make_format_with_tymed(format_id, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0 | TYMED_ISTORAGE.0));
-                        if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
-                            let size = unsafe {
-                                if (medium.tymed & TYMED_HGLOBAL.0 as u32) != 0 {
-                                    GlobalSize(medium.u.hGlobal) as usize
-                                } else {
-                                    0
-                                }
-                            };
-                            // Release the medium
-                            unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
-                            
-                            // Consider substantial if > 4KB (real .msg files are usually much larger)
-                            if size > 4096 {
-                                log::debug!("Found substantial file-related content: format={}, size={} bytes", 
-                                           format_to_string(format_id), size);
-                                return true;
-                            }
-                        }
-                    }
-                    false
-                })
-            })
-            .unwrap_or(false);
-        
-        let has_real_content = has_istorage_formats || has_real_file_descriptors || has_real_filecontents || has_substantial_content;
-        
-        if has_real_content {
-            log::warn!("*** REAL CONTENT DETECTED: istorage={}, real_files={}, real_filecontents={}, substantial_file_content={} ***", 
-                      has_istorage_formats, has_real_file_descriptors, has_real_filecontents, has_substantial_content);
-        } else {
-            log::warn!("No real file content detected - Outlook New direct drag provides only web metadata");
-            log::warn!("Missing: istorage={}, real_files={}, real_filecontents={}, substantial_file_content={}", 
-                      has_istorage_formats, has_real_file_descriptors, has_real_filecontents, has_substantial_content);
-            log::warn!("Outlook New direct drag provides only text/HTML clipboard data and web metadata, not real .msg files");
-        }
-        
-        Ok(has_real_content)
-    }
-    
-    /// Check if Outlook web formats contain actual email content
-    fn has_outlook_web_email_content(&self) -> NativeExtensionsResult<bool> {
-        // Check for text content that might be email body
-        let text_formats = [
-            ("CF_UNICODETEXT", CF_UNICODETEXT.0 as u32),
-            ("text/plain", unsafe { RegisterClipboardFormatW(w!("text/plain")) }),
-            ("HTML Format", unsafe { RegisterClipboardFormatW(w!("HTML Format")) }),
-            ("text/html", unsafe { RegisterClipboardFormatW(w!("text/html")) }),
-            ("CF_HTML", unsafe { RegisterClipboardFormatW(w!("CF_HTML")) }),
-            ("Html", unsafe { RegisterClipboardFormatW(w!("Html")) }),
-        ];
-        
-        for (name, format) in &text_formats {
-            if self.data_object.has_data(*format) {
-                log::warn!("*** FOUND FORMAT: {} ***", name);
-                let format_etc = make_format_with_tymed(*format, TYMED(TYMED_HGLOBAL.0));
-                if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
-                    let data = unsafe {
-                        let hglobal = medium.u.hGlobal;
-                        safe_slice_from_global_memory(hglobal)
-                    };
-                    
-                    unsafe {
-                        ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
-                    }
-                    
-                    if let Some(data) = data {
-                        if data.len() > 100 { // Reasonable threshold for email content
-                            log::warn!("Found {} bytes of text content in format {}", data.len(), name);
-                            return Ok(true);
-                        }
-                    }
-                }
-            } else {
-                log::warn!("Format {} NOT available", name);
-            }
-        }
-        
-        // Check for custom Outlook web formats that might contain structured data
-        let custom_formats = [
-            "NativeShell_CF_15",
-            "Chromium Web Custom MIME Data Format",
-            "DragContext",
-            "chromium/x-renderer-taint",
-        ];
-        
-        for format_name in &custom_formats {
-            let format = unsafe { RegisterClipboardFormatW(&HSTRING::from(*format_name)) };
-            if self.data_object.has_data(format) {
-                let format_etc = make_format_with_tymed(format, TYMED(TYMED_HGLOBAL.0));
-                if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
-                    let data = unsafe {
-                        let hglobal = medium.u.hGlobal;
-                        safe_slice_from_global_memory(hglobal)
-                    };
-                    
-                    unsafe {
-                        ReleaseStgMedium(&mut medium as *mut STGMEDIUM);
-                    }
-                    
-                    if let Some(data) = data {
-                        log::debug!("Found {} bytes in custom format {}", data.len(), format_name);
-                        if data.len() > 50 { // Some threshold for meaningful data
-                            return Ok(true);
-                        }
-                    }
-                }
-            }
-        }
-        
-        Ok(false)
     }
 
     fn extract_file_descriptors(buffer: Vec<u8>) -> NativeExtensionsResult<Vec<FileDescriptor>> {
@@ -2332,9 +1977,9 @@ impl PlatformDataReader {
         log::warn!("All attempts to retrieve virtual file content failed for file '{}' at index {}", 
                   descriptor.name, descriptor.index);
         
-        // For traditional Outlook, try alternative approaches
-        if self.probably_outlook_message().unwrap_or(false) {
-            log::warn!("Traditional Outlook detected but CFSTR_FILECONTENTS failed - this may be a locked message");
+        // For potential email content, try alternative approaches
+        if descriptor.name.ends_with(".eml") || descriptor.name.ends_with(".msg") {
+            log::warn!("Email file detected but CFSTR_FILECONTENTS failed - this may be a locked message");
             log::warn!("Available format verification:");
             
             // Verify the FileContents format is really available
@@ -2352,7 +1997,7 @@ impl PlatformDataReader {
         }
         
         // Try to synthesize email content if this looks like an Outlook email file
-        if descriptor.name.ends_with(".eml") && self.probably_outlook_message().unwrap_or(false) {
+        if descriptor.name.ends_with(".eml") {
             log::debug!("Attempting to synthesize email content for '{}'", descriptor.name);
             
             // Create synthetic email content
@@ -2447,10 +2092,9 @@ impl PlatformDataReader {
             }
         }
         
-        // If no traditional virtual file, try to create email file from Outlook web content
-        if self.probably_outlook_message()? && 
-           (format.contains("message/") || format.contains("application/")) {
-            log::debug!("Creating email file from Outlook web content for format: {}", format);
+        // If no traditional virtual file, try to create email file from web content
+        if format.contains("message/") || format.contains("application/") {
+            log::debug!("Creating email file from web content for format: {}", format);
             return self.copy_outlook_web_email_file(target_folder, progress).await;
         }
         
