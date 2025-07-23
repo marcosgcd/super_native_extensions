@@ -450,6 +450,47 @@ impl PlatformDataReader {
             }
         }
         
+        // Additional check: Block drops that claim to have files but no proper filenames
+        let has_file_descriptors = self.with_file_descriptors(|descriptors| {
+            if let Some(descriptors) = descriptors {
+                let has_valid_files = descriptors.iter().any(|desc| {
+                    !desc.name.is_empty() && desc.name != "Unknown" && desc.name.contains('.')
+                });
+                log::debug!("File descriptor validation: count={}, has_valid_files={}", descriptors.len(), has_valid_files);
+                Ok(has_valid_files)
+            } else {
+                Ok(false)
+            }
+        }).unwrap_or(false);
+        
+        let has_hdrop = self.with_hdrop(|hdrop| {
+            if let Some(hdrop) = hdrop {
+                let has_valid_files = hdrop.iter().any(|path| {
+                    !path.is_empty() && std::path::Path::new(path).file_name().is_some()
+                });
+                log::debug!("HDROP validation: count={}, has_valid_files={}", hdrop.len(), has_valid_files);
+                Ok(has_valid_files)
+            } else {
+                Ok(false)
+            }
+        }).unwrap_or(false);
+        
+        // If we have file-related formats but no valid filenames, reject the drop
+        let formats = self.data_object_formats_raw()?;
+        let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
+        let claims_to_have_files = format_strings.iter().any(|f| {
+            f.contains("FileGroupDescriptor") || f.contains("FileContents") || f.contains("CF_HDROP")
+        });
+        
+        if claims_to_have_files && !has_file_descriptors && !has_hdrop {
+            log::error!("*** REJECTING DROP - CLAIMS FILES BUT NO VALID FILENAMES ***");
+            log::error!("Available formats suggest files but no valid filenames found");
+            log::error!("This usually indicates a malformed or incomplete drag operation");
+            return Err(NativeExtensionsError::OtherError(
+                "Invalid file drag operation (no valid filenames). Try dragging individual files instead.".into()
+            ));
+        }
+        
         // Log if we detected Outlook Classic so user knows it's working
         if self.is_outlook_classic().unwrap_or(false) {
             log::warn!("*** ACCEPTED DROP FROM OUTLOOK CLASSIC - Real .msg extraction available ***");
@@ -695,7 +736,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 39 - ACTUALLY FIXED OUTLOOK NEW 0-BYTE FILES: Content detection now only considers file-related formats (FILECONTENTS, FILEDESCRIPTOR, HDROP), not Chromium web metadata. This truly blocks Outlook New direct drag while allowing real file content.");
+        log::warn!("current version 40 - FIXED OUTLOOK DETECTION LOGIC: Corrected misidentification of Outlook Classic as Outlook New. Now requires both FileGroupDescriptor AND FileContents for Classic detection, and adds filename validation to block malformed drops.");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1544,9 +1585,13 @@ impl PlatformDataReader {
         let formats = self.data_object_formats_raw()?;
         let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
         
-        // Check for traditional Outlook Classic patterns
+        // Check for traditional Outlook Classic file transfer patterns
         let has_file_descriptors = format_strings.iter().any(|f| {
-            f.contains("FileGroupDescriptor") || f.contains("FileContents")
+            f.contains("FileGroupDescriptor") || f.contains("FileGroupDescriptorW")
+        });
+        
+        let has_file_contents = format_strings.iter().any(|f| {
+            f.contains("FileContents")
         });
         
         let has_storage_formats = format_strings.iter().any(|f| {
@@ -1563,12 +1608,16 @@ impl PlatformDataReader {
             Err(_) => false
         };
         
-        // Outlook Classic should have file descriptors AND either storage formats OR ISTORAGE support
-        let is_classic = has_file_descriptors && (has_storage_formats || has_istorage_support);
+        // Outlook Classic must have BOTH file descriptors AND file contents
+        // This is the key difference from web-based drag operations
+        let is_classic = has_file_descriptors && has_file_contents;
         
         if is_classic {
-            log::warn!("*** DETECTED OUTLOOK CLASSIC: file_descriptors={}, storage_formats={}, istorage_support={} ***", 
-                      has_file_descriptors, has_storage_formats, has_istorage_support);
+            log::warn!("*** DETECTED OUTLOOK CLASSIC: file_descriptors={}, file_contents={}, storage_formats={}, istorage_support={} ***", 
+                      has_file_descriptors, has_file_contents, has_storage_formats, has_istorage_support);
+        } else {
+            log::debug!("Not Outlook Classic: file_descriptors={}, file_contents={}, storage_formats={}, istorage_support={}", 
+                       has_file_descriptors, has_file_contents, has_storage_formats, has_istorage_support);
         }
         
         Ok(is_classic)
@@ -1579,26 +1628,35 @@ impl PlatformDataReader {
         let formats = self.data_object_formats_raw()?;
         let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
         
+        // First check if this is actually Outlook Classic
+        if self.is_outlook_classic().unwrap_or(false) {
+            log::debug!("Not Outlook New - detected as Outlook Classic instead");
+            return Ok(false);
+        }
+        
         // Modern Outlook New uses web rendering engine patterns
         let has_chromium_formats = format_strings.iter().any(|f| {
             f.contains("Chromium Web Custom MIME Data Format") ||
-            f.contains("chromium/x-renderer-taint") ||
-            f.contains("NativeShell_CF_15")
+            f.contains("chromium/x-renderer-taint")
         });
         
         let has_web_indicators = format_strings.iter().any(|f| {
             f.contains("DragContext") ||
-            f.contains("DragImageBits") ||
-            f.contains("text/html") ||
-            f.contains("HTML Format")
+            f.contains("DragImageBits")
         });
         
-        // Outlook New typically has these web patterns but NO real compound storage
-        let is_new = has_chromium_formats && has_web_indicators && !self.is_outlook_classic().unwrap_or(false);
+        // Key difference: Outlook New should NOT have real file transfer formats
+        let has_real_file_formats = format_strings.iter().any(|f| {
+            f.contains("FileContents") ||
+            f.contains("FileGroupDescriptor")
+        });
+        
+        // Outlook New: has web patterns but NO real file formats
+        let is_new = has_chromium_formats && has_web_indicators && !has_real_file_formats;
         
         if is_new {
-            log::warn!("*** DETECTED OUTLOOK NEW (WEB-BASED): chromium={}, web_indicators={} ***", 
-                      has_chromium_formats, has_web_indicators);
+            log::warn!("*** DETECTED OUTLOOK NEW (WEB-BASED): chromium={}, web_indicators={}, no_file_formats={} ***", 
+                      has_chromium_formats, has_web_indicators, !has_real_file_formats);
             log::warn!("Checking if Outlook New has real content this time...");
         }
         
