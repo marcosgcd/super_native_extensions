@@ -434,14 +434,20 @@ fn istorage_to_vec(storage: &IStorage) -> windows::core::Result<Vec<u8>> {
 
 impl PlatformDataReader {
     pub fn get_items_sync(&self) -> NativeExtensionsResult<Vec<i64>> {
-        // Early rejection: Check if this is Outlook New and reject the drop
+        // Smart rejection: Check content quality before blocking Outlook New
         if self.is_outlook_new().unwrap_or(false) {
-            log::error!("*** REJECTING DROP FROM OUTLOOK NEW ***");
-            log::error!("Outlook New only provides placeholder content - dropping real .msg files requires Outlook Classic");
-            log::error!("Please use Outlook Classic for drag-and-drop of email messages");
-            return Err(NativeExtensionsError::OtherError(
-                "Outlook New drag-and-drop not supported. Please use Outlook Classic for email message drops.".into()
-            ));
+            // Check if Outlook New actually has real content this time
+            if self.has_real_msg_content().unwrap_or(false) {
+                log::warn!("*** OUTLOOK NEW WITH REAL CONTENT DETECTED - Allowing drop ***");
+                log::warn!("User likely dropped to desktop first, then re-dragged - .msg content should be genuine");
+            } else {
+                log::error!("*** REJECTING DROP FROM OUTLOOK NEW - NO REAL CONTENT ***");
+                log::error!("Outlook New provides only placeholder content in direct drag-and-drop");
+                log::error!("Try: 1) Use Outlook Classic, or 2) Drop to desktop first, then drag the .msg file");
+                return Err(NativeExtensionsError::OtherError(
+                    "Outlook New direct drag-and-drop not supported (no real content). Use Outlook Classic or drop to desktop first.".into()
+                ));
+            }
         }
         
         // Log if we detected Outlook Classic so user knows it's working
@@ -689,7 +695,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 36 - OUTLOOK NEW REJECTION: Added detection and rejection of Outlook New drops to prevent placeholder content files. Only Outlook Classic supported for real .msg extraction.");
+        log::warn!("current version 37 - SMART OUTLOOK NEW HANDLING: Enhanced detection to allow Outlook New when it has real content (e.g., after desktop drop). Only blocks placeholder-only content.");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1593,10 +1599,78 @@ impl PlatformDataReader {
         if is_new {
             log::warn!("*** DETECTED OUTLOOK NEW (WEB-BASED): chromium={}, web_indicators={} ***", 
                       has_chromium_formats, has_web_indicators);
-            log::warn!("Outlook New provides only placeholder content - should be rejected");
+            log::warn!("Checking if Outlook New has real content this time...");
         }
         
         Ok(is_new)
+    }
+    
+    /// Check if the drag operation has real .msg compound storage content
+    /// This can detect when Outlook New actually provides real files (e.g., after desktop drop)
+    fn has_real_msg_content(&self) -> NativeExtensionsResult<bool> {
+        // Check if any formats support TYMED_ISTORAGE (real compound storage)
+        let has_istorage_formats = match safe_enum_format_etc(&self.data_object) {
+            Ok(formats) => {
+                formats.iter().any(|f| (f.tymed & TYMED_ISTORAGE.0 as u32) != 0)
+            }
+            Err(_) => false
+        };
+        
+        // Check for file descriptors that suggest real files
+        let has_real_file_descriptors = self.with_file_descriptors(|descriptors| {
+            if let Some(descriptors) = descriptors {
+                let has_msg_files = descriptors.iter().any(|desc| {
+                    desc.name.to_lowercase().ends_with(".msg") && desc.expected_size.unwrap_or(0) > 1024
+                });
+                log::debug!("File descriptors analysis: has_msg_files={}, count={}", 
+                           has_msg_files, descriptors.len());
+                Ok(has_msg_files)
+            } else {
+                Ok(false)
+            }
+        }).unwrap_or(false);
+        
+        // Check for substantial file content (not just placeholder text)
+        let has_substantial_content = self.data_object_formats_raw()
+            .map(|formats| {
+                formats.iter().any(|&format_id| {
+                    if self.data_object.has_data(format_id) {
+                        // Try to get the data size to see if it's substantial
+                        let format_etc = make_format_with_tymed(format_id, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0 | TYMED_ISTORAGE.0));
+                        if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                            let size = unsafe {
+                                if (medium.tymed & TYMED_HGLOBAL.0 as u32) != 0 {
+                                    GlobalSize(medium.u.hGlobal) as usize
+                                } else {
+                                    0
+                                }
+                            };
+                            // Release the medium
+                            unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
+                            
+                            // Consider substantial if > 4KB (real .msg files are usually much larger)
+                            if size > 4096 {
+                                log::debug!("Found substantial content: format={}, size={} bytes", 
+                                           format_to_string(format_id), size);
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                })
+            })
+            .unwrap_or(false);
+        
+        let has_real_content = has_istorage_formats || has_real_file_descriptors || has_substantial_content;
+        
+        if has_real_content {
+            log::warn!("*** REAL CONTENT DETECTED: istorage={}, real_files={}, substantial={} ***", 
+                      has_istorage_formats, has_real_file_descriptors, has_substantial_content);
+        } else {
+            log::warn!("No real content detected - likely placeholder/web content only");
+        }
+        
+        Ok(has_real_content)
     }
     
     /// Check if Outlook web formats contain actual email content
