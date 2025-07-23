@@ -434,6 +434,21 @@ fn istorage_to_vec(storage: &IStorage) -> windows::core::Result<Vec<u8>> {
 
 impl PlatformDataReader {
     pub fn get_items_sync(&self) -> NativeExtensionsResult<Vec<i64>> {
+        // Early rejection: Check if this is Outlook New and reject the drop
+        if self.is_outlook_new().unwrap_or(false) {
+            log::error!("*** REJECTING DROP FROM OUTLOOK NEW ***");
+            log::error!("Outlook New only provides placeholder content - dropping real .msg files requires Outlook Classic");
+            log::error!("Please use Outlook Classic for drag-and-drop of email messages");
+            return Err(NativeExtensionsError::OtherError(
+                "Outlook New drag-and-drop not supported. Please use Outlook Classic for email message drops.".into()
+            ));
+        }
+        
+        // Log if we detected Outlook Classic so user knows it's working
+        if self.is_outlook_classic().unwrap_or(false) {
+            log::warn!("*** ACCEPTED DROP FROM OUTLOOK CLASSIC - Real .msg extraction available ***");
+        }
+        
         Ok((0..self.item_count()? as i64).collect())
     }
 
@@ -674,7 +689,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 35 - API SIGNATURE FIXES: Updated Windows 0.52 API signatures (STGM flags, CreateILockBytesOnHGlobal return values, CopyTo params, as_ref patterns)");
+        log::warn!("current version 36 - OUTLOOK NEW REJECTION: Added detection and rejection of Outlook New drops to prevent placeholder content files. Only Outlook Classic supported for real .msg extraction.");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1515,41 +1530,73 @@ impl PlatformDataReader {
     }
 
     fn probably_outlook_message(&self) -> NativeExtensionsResult<bool> {
+        self.is_outlook_classic().or_else(|_| self.is_outlook_new())
+    }
+    
+    /// Detect Outlook Classic with real compound storage (.msg) files
+    fn is_outlook_classic(&self) -> NativeExtensionsResult<bool> {
         let formats = self.data_object_formats_raw()?;
         let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
         
-        // Traditional Outlook email formats - prioritize these
-        let traditional_outlook = format_strings.iter().any(|f| {
-            f.contains("FileGroupDescriptor") || 
+        // Check for traditional Outlook Classic patterns
+        let has_file_descriptors = format_strings.iter().any(|f| {
+            f.contains("FileGroupDescriptor") || f.contains("FileContents")
+        });
+        
+        let has_storage_formats = format_strings.iter().any(|f| {
             f.contains("RenPrivateMessages") || 
-            f.contains("FileContents") ||
             f.contains("message/rfc822") ||
             f.contains("application/vnd.ms-outlook")
         });
         
-        // If we detect traditional Outlook, use that and skip web checks
-        if traditional_outlook {
-            log::warn!("Detected traditional Outlook message - using classic drag-and-drop handling");
-            return Ok(true);
+        // Check if any formats support TYMED_ISTORAGE (sign of real compound storage)
+        let has_istorage_support = match safe_enum_format_etc(&self.data_object) {
+            Ok(formats) => {
+                formats.iter().any(|f| (f.tymed & TYMED_ISTORAGE.0 as u32) != 0)
+            }
+            Err(_) => false
+        };
+        
+        // Outlook Classic should have file descriptors AND either storage formats OR ISTORAGE support
+        let is_classic = has_file_descriptors && (has_storage_formats || has_istorage_support);
+        
+        if is_classic {
+            log::warn!("*** DETECTED OUTLOOK CLASSIC: file_descriptors={}, storage_formats={}, istorage_support={} ***", 
+                      has_file_descriptors, has_storage_formats, has_istorage_support);
         }
         
-        // Only check for modern web-based Outlook if traditional isn't found
-        let modern_outlook_web = format_strings.iter().any(|f| {
-            f.contains("NativeShell_CF_15") ||  // Outlook-specific native format
-            f.contains("Chromium Web Custom MIME Data Format") // Modern Outlook uses Chromium
-        }) && format_strings.iter().any(|f| {
-            f.contains("DragContext") ||  // Indicates structured drag operation
-            f.contains("DragImageBits")   // Indicates email with visual preview
+        Ok(is_classic)
+    }
+    
+    /// Detect Outlook New (web-based) that only provides placeholder content
+    fn is_outlook_new(&self) -> NativeExtensionsResult<bool> {
+        let formats = self.data_object_formats_raw()?;
+        let format_strings: Vec<String> = formats.iter().map(|f| format_to_string(*f)).collect();
+        
+        // Modern Outlook New uses web rendering engine patterns
+        let has_chromium_formats = format_strings.iter().any(|f| {
+            f.contains("Chromium Web Custom MIME Data Format") ||
+            f.contains("chromium/x-renderer-taint") ||
+            f.contains("NativeShell_CF_15")
         });
         
-        let result = traditional_outlook || modern_outlook_web;
+        let has_web_indicators = format_strings.iter().any(|f| {
+            f.contains("DragContext") ||
+            f.contains("DragImageBits") ||
+            f.contains("text/html") ||
+            f.contains("HTML Format")
+        });
         
-        if result {
-            log::warn!("Detected Outlook message: traditional={}, modern_web={}", 
-                      traditional_outlook, modern_outlook_web);
+        // Outlook New typically has these web patterns but NO real compound storage
+        let is_new = has_chromium_formats && has_web_indicators && !self.is_outlook_classic().unwrap_or(false);
+        
+        if is_new {
+            log::warn!("*** DETECTED OUTLOOK NEW (WEB-BASED): chromium={}, web_indicators={} ***", 
+                      has_chromium_formats, has_web_indicators);
+            log::warn!("Outlook New provides only placeholder content - should be rejected");
         }
         
-        Ok(result)
+        Ok(is_new)
     }
     
     /// Check if Outlook web formats contain actual email content
