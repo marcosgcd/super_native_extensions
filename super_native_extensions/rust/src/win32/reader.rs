@@ -695,7 +695,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 37 - SMART OUTLOOK NEW HANDLING: Enhanced detection to allow Outlook New when it has real content (e.g., after desktop drop). Only blocks placeholder-only content.");
+        log::warn!("current version 38 - FIXED OUTLOOK NEW 0-BYTE FILES: Enhanced content detection now verifies FILECONTENTS has substantial size (>4KB), not just text/HTML clipboard data. This prevents 0-byte .msg files from Outlook New direct drag while still allowing real content after desktop drop.");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1630,6 +1630,51 @@ impl PlatformDataReader {
             }
         }).unwrap_or(false);
         
+        // CRITICAL: Check if FILECONTENTS actually has real data (not just text/HTML clipboard data)
+        let has_real_filecontents = self.with_file_descriptors(|descriptors| {
+            if let Some(descriptors) = descriptors {
+                for (index, desc) in descriptors.iter().enumerate() {
+                    if desc.name.to_lowercase().ends_with(".msg") {
+                        // Try to get the actual FILECONTENTS to verify it has real data
+                        let format = unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) };
+                        let format_etc = make_format_with_tymed_index(
+                            format,
+                            TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0 | TYMED_ISTORAGE.0),
+                            index as i32,
+                        );
+                        
+                        if let Ok(Some(mut medium)) = safe_get_data(&self.data_object, &format_etc) {
+                            let size = unsafe {
+                                if (medium.tymed & TYMED_HGLOBAL.0 as u32) != 0 {
+                                    GlobalSize(medium.u.hGlobal) as usize
+                                } else if (medium.tymed & TYMED_ISTORAGE.0 as u32) != 0 {
+                                    // IStorage always counts as real content
+                                    log::warn!("Found TYMED_ISTORAGE for .msg file - real content confirmed");
+                                    unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
+                                    return Ok(true);
+                                } else {
+                                    0
+                                }
+                            };
+                            
+                            unsafe { ReleaseStgMedium(&mut medium as *mut STGMEDIUM) };
+                            
+                            // Real .msg files should be at least 4KB
+                            if size > 4096 {
+                                log::warn!("FILECONTENTS has substantial size: {} bytes for {}", size, desc.name);
+                                return Ok(true);
+                            } else {
+                                log::warn!("FILECONTENTS too small: {} bytes for {} - likely Outlook New placeholder", size, desc.name);
+                            }
+                        } else {
+                            log::warn!("Could not get FILECONTENTS for {} - likely Outlook New", desc.name);
+                        }
+                    }
+                }
+            }
+            Ok(false)
+        }).unwrap_or(false);
+        
         // Check for substantial file content (not just placeholder text)
         let has_substantial_content = self.data_object_formats_raw()
             .map(|formats| {
@@ -1661,13 +1706,14 @@ impl PlatformDataReader {
             })
             .unwrap_or(false);
         
-        let has_real_content = has_istorage_formats || has_real_file_descriptors || has_substantial_content;
+        let has_real_content = has_istorage_formats || has_real_file_descriptors || has_real_filecontents || has_substantial_content;
         
         if has_real_content {
-            log::warn!("*** REAL CONTENT DETECTED: istorage={}, real_files={}, substantial={} ***", 
-                      has_istorage_formats, has_real_file_descriptors, has_substantial_content);
+            log::warn!("*** REAL CONTENT DETECTED: istorage={}, real_files={}, real_filecontents={}, substantial={} ***", 
+                      has_istorage_formats, has_real_file_descriptors, has_real_filecontents, has_substantial_content);
         } else {
-            log::warn!("No real content detected - likely placeholder/web content only");
+            log::warn!("No real content detected - likely Outlook New placeholder/web content only");
+            log::warn!("Outlook New direct drag provides only text/HTML clipboard data, not real .msg files");
         }
         
         Ok(has_real_content)
