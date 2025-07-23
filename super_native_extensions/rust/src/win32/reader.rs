@@ -695,7 +695,7 @@ impl PlatformDataReader {
         &self,
         item: i64,
     ) -> NativeExtensionsResult<Option<String>> {
-        log::warn!("current version 38 - FIXED OUTLOOK NEW 0-BYTE FILES: Enhanced content detection now verifies FILECONTENTS has substantial size (>4KB), not just text/HTML clipboard data. This prevents 0-byte .msg files from Outlook New direct drag while still allowing real content after desktop drop.");
+        log::warn!("current version 39 - ACTUALLY FIXED OUTLOOK NEW 0-BYTE FILES: Content detection now only considers file-related formats (FILECONTENTS, FILEDESCRIPTOR, HDROP), not Chromium web metadata. This truly blocks Outlook New direct drag while allowing real file content.");
         log::debug!("Getting suggested name for item {}", item);
         
         if let Some(descriptor) = self.descriptor_for_item(item)? {
@@ -1675,10 +1675,23 @@ impl PlatformDataReader {
             Ok(false)
         }).unwrap_or(false);
         
-        // Check for substantial file content (not just placeholder text)
+        // Check for substantial file content - BUT ONLY from file-related formats, not generic clipboard data
         let has_substantial_content = self.data_object_formats_raw()
             .map(|formats| {
+                // Only check file-related formats, not generic clipboard formats like Chromium metadata
+                let file_related_formats = [
+                    unsafe { RegisterClipboardFormatW(CFSTR_FILECONTENTS) },
+                    unsafe { RegisterClipboardFormatW(CFSTR_FILEDESCRIPTOR) },
+                    unsafe { RegisterClipboardFormatW(&HSTRING::from(CFSTR_FILEDESCRIPTORW)) },
+                    CF_HDROP.0 as u32,
+                ];
+                
                 formats.iter().any(|&format_id| {
+                    // Only check formats that are actually file-related
+                    if !file_related_formats.contains(&format_id) {
+                        return false;
+                    }
+                    
                     if self.data_object.has_data(format_id) {
                         // Try to get the data size to see if it's substantial
                         let format_etc = make_format_with_tymed(format_id, TYMED(TYMED_HGLOBAL.0 | TYMED_ISTREAM.0 | TYMED_ISTORAGE.0));
@@ -1695,7 +1708,7 @@ impl PlatformDataReader {
                             
                             // Consider substantial if > 4KB (real .msg files are usually much larger)
                             if size > 4096 {
-                                log::debug!("Found substantial content: format={}, size={} bytes", 
+                                log::debug!("Found substantial file-related content: format={}, size={} bytes", 
                                            format_to_string(format_id), size);
                                 return true;
                             }
@@ -1709,11 +1722,13 @@ impl PlatformDataReader {
         let has_real_content = has_istorage_formats || has_real_file_descriptors || has_real_filecontents || has_substantial_content;
         
         if has_real_content {
-            log::warn!("*** REAL CONTENT DETECTED: istorage={}, real_files={}, real_filecontents={}, substantial={} ***", 
+            log::warn!("*** REAL CONTENT DETECTED: istorage={}, real_files={}, real_filecontents={}, substantial_file_content={} ***", 
                       has_istorage_formats, has_real_file_descriptors, has_real_filecontents, has_substantial_content);
         } else {
-            log::warn!("No real content detected - likely Outlook New placeholder/web content only");
-            log::warn!("Outlook New direct drag provides only text/HTML clipboard data, not real .msg files");
+            log::warn!("No real file content detected - Outlook New direct drag provides only web metadata");
+            log::warn!("Missing: istorage={}, real_files={}, real_filecontents={}, substantial_file_content={}", 
+                      has_istorage_formats, has_real_file_descriptors, has_real_filecontents, has_substantial_content);
+            log::warn!("Outlook New direct drag provides only text/HTML clipboard data and web metadata, not real .msg files");
         }
         
         Ok(has_real_content)
