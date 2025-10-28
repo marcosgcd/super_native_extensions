@@ -132,14 +132,21 @@ impl PlatformDragContext {
     }
 
     pub unsafe fn synthesize_mouse_up_event(&self) -> Option<Id<NSEvent>> {
+        log::info!("[SNE] synthesize_mouse_up_event called");
         self.finish_scroll_events();
 
         if let Some(original_event) = self.last_mouse_down_event.borrow().as_ref().cloned() {
+            let event_type = original_event.r#type();
+            log::info!("[SNE] synthesize_mouse_up_event: original event type={:?}", event_type);
+            
             #[allow(non_upper_case_globals)]
-            let opposite = match original_event.r#type() {
+            let opposite = match event_type {
                 NSEventType::LeftMouseDown => CGEventType::LeftMouseUp,
                 NSEventType::RightMouseDown => CGEventType::RightMouseUp,
-                _ => return None,
+                _ => {
+                    log::info!("[SNE] synthesize_mouse_up_event: unexpected event type, returning None");
+                    return None;
+                }
             };
 
             let event = original_event.CGEvent();
@@ -151,10 +158,12 @@ impl PlatformDragContext {
 
             let window = self.view.window();
             if let Some(window) = window {
+                log::info!("[SNE] synthesize_mouse_up_event: sending synthesized event to window");
                 window.sendEvent(&synthesized);
             }
             Some(original_event.clone())
         } else {
+            log::info!("[SNE] synthesize_mouse_up_event: no last_mouse_down_event, returning None");
             None
         }
     }
@@ -169,6 +178,7 @@ impl PlatformDragContext {
         mut providers: HashMap<DataProviderId, DataProviderEntry>,
         session_id: DragSessionId,
     ) -> NativeExtensionsResult<()> {
+        log::info!("[SNE] start_drag called: session_id={:?}, items_count={}", session_id, request.configuration.items.len());
         unsafe { self.synthesize_mouse_up_event() };
 
         let mut dragging_items = Vec::<Id<NSDraggingItem>>::new();
@@ -235,18 +245,30 @@ impl PlatformDragContext {
     }
 
     fn on_mouse_down(&self, event: Id<NSEvent>) {
+        let event_type = unsafe { event.r#type() };
+        let click_count = unsafe { event.clickCount() };
+        let pressure = unsafe { event.pressure() };
+        log::info!("[SNE] on_mouse_down: type={:?}, clickCount={}, pressure={}", event_type, click_count, pressure);
         self.last_mouse_down_event.replace(Some(event));
     }
 
     fn on_mouse_up(&self, event: Id<NSEvent>) {
+        let event_type = unsafe { event.r#type() };
+        let click_count = unsafe { event.clickCount() };
+        let pressure = unsafe { event.pressure() };
+        log::info!("[SNE] on_mouse_up: type={:?}, clickCount={}, pressure={}", event_type, click_count, pressure);
         self.last_mouse_up_event.replace(Some(event));
     }
 
     fn on_right_mouse_down(&self, event: Id<NSEvent>) {
+        let event_type = unsafe { event.r#type() };
+        log::info!("[SNE] on_right_mouse_down: type={:?}", event_type);
         self.last_mouse_down_event.replace(Some(event));
     }
 
     fn on_right_mouse_up(&self, event: Id<NSEvent>) {
+        let event_type = unsafe { event.r#type() };
+        log::info!("[SNE] on_right_mouse_up: type={:?}", event_type);
         self.last_mouse_up_event.replace(Some(event));
     }
 
@@ -347,6 +369,8 @@ impl PlatformDragContext {
         _point: NSPoint,
         operation: NSDragOperation,
     ) {
+        log::info!("[SNE] drag_ended called: operation={:?}", operation);
+        
         let user_cancelled = unsafe {
             let app = NSApplication::sharedApplication(self.main_thread_marker);
             let event = app.currentEvent();
@@ -358,6 +382,8 @@ impl PlatformDragContext {
                 None => false,
             }
         };
+
+        log::info!("[SNE] drag_ended: user_cancelled={}", user_cancelled);
 
         let dragging_sequence_number = unsafe { session.draggingSequenceNumber() };
         let session = self
@@ -374,6 +400,9 @@ impl PlatformDragContext {
         } else {
             operation
         };
+        
+        log::info!("[SNE] drag_ended: final operation={:?}", operation);
+        
         if let Some(delegate) = self.delegate.upgrade() {
             delegate.drag_session_did_end_with_operation(self.id, session.session_id, operation);
         }
@@ -402,27 +431,44 @@ impl PlatformDragContext {
     }
 
     pub fn should_delay_window_ordering(&self, event: &NSEvent) -> bool {
-        if unsafe { event.r#type() } == NSEventType::LeftMouseDown {
+        let event_type = unsafe { event.r#type() };
+        log::info!("[SNE] should_delay_window_ordering called: event_type={:?}", event_type);
+        
+        if event_type == NSEventType::LeftMouseDown {
             let location: NSPoint = unsafe { event.locationInWindow() };
             let location: NSPoint = self.view.convertPoint_fromView(location, None);
+            log::info!("[SNE] should_delay_window_ordering: checking location ({}, {})", location.x, location.y);
+            
             if let Some(delegate) = self.delegate.upgrade() {
                 let is_draggable_promise = delegate.is_location_draggable(self.id, location.into());
-                let mut poll_session = PollSession::new();
-                loop {
-                    if let Some(result) = is_draggable_promise.try_take() {
-                        match result {
-                            PromiseResult::Ok { value } => return value,
-                            PromiseResult::Cancelled => return false,
+                
+                // Check if the result is immediately available (non-blocking check)
+                if let Some(result) = is_draggable_promise.try_take() {
+                    match result {
+                        PromiseResult::Ok { value } => {
+                            log::info!("[SNE] should_delay_window_ordering: is_draggable={} (immediate)", value);
+                            return value;
+                        }
+                        PromiseResult::Cancelled => {
+                            log::info!("[SNE] should_delay_window_ordering: cancelled (immediate)");
+                            return false;
                         }
                     }
-                    RunLoop::current()
-                        .platform_run_loop
-                        .poll_once(&mut poll_session);
                 }
+                
+                // If not immediately available, don't block - return false to allow
+                // normal event processing. This prevents trackpad tap events from being
+                // delayed and misinterpreted as long presses by Flutter's gesture recognizers.
+                // The drag will still work because start_drag checks is_location_draggable
+                // properly before initiating drag operations.
+                log::info!("[SNE] should_delay_window_ordering: not immediately available, returning false (non-blocking)");
+                false
             } else {
+                log::info!("[SNE] should_delay_window_ordering: no delegate, returning false");
                 false
             }
         } else {
+            log::info!("[SNE] should_delay_window_ordering: not LeftMouseDown, returning false");
             false
         }
     }
@@ -556,26 +602,39 @@ where
 }
 
 extern "C" fn mouse_down_can_move_window(_this: &NSView, _sel: Sel) -> Bool {
+    log::info!("[SNE] mouse_down_can_move_window called");
     Bool::YES
 }
 
 extern "C" fn mouse_down(this: &NSView, _sel: Sel, event: &NSEvent) {
+    let event_type = unsafe { event.r#type() };
+    let subtype = unsafe { event.subtype() };
+    log::info!("[SNE] extern mouse_down called: type={:?}, subtype={:?}", event_type, subtype);
+    
     with_state(this, |state| state.on_mouse_down(event.retain()), || ());
 
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), mouseDown: event];
     }
+    log::info!("[SNE] extern mouse_down: forwarded to super");
 }
 
 extern "C" fn mouse_up(this: &NSView, _sel: Sel, event: &NSEvent) {
+    let event_type = unsafe { event.r#type() };
+    let subtype = unsafe { event.subtype() };
+    log::info!("[SNE] extern mouse_up called: type={:?}, subtype={:?}", event_type, subtype);
+    
     with_state(this, |state| state.on_mouse_up(event.retain()), || ());
 
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), mouseUp: event];
     }
+    log::info!("[SNE] extern mouse_up: forwarded to super");
 }
 
 extern "C" fn right_mouse_down(this: &NSView, _sel: Sel, event: &NSEvent) {
+    log::info!("[SNE] extern right_mouse_down called");
+    
     with_state(
         this,
         |state| state.on_right_mouse_down(event.retain()),
@@ -588,6 +647,8 @@ extern "C" fn right_mouse_down(this: &NSView, _sel: Sel, event: &NSEvent) {
 }
 
 extern "C" fn right_mouse_up(this: &NSView, _sel: Sel, event: &NSEvent) {
+    log::info!("[SNE] extern right_mouse_up called");
+    
     with_state(this, |state| state.on_right_mouse_up(event.retain()), || ());
 
     unsafe {
@@ -596,6 +657,7 @@ extern "C" fn right_mouse_up(this: &NSView, _sel: Sel, event: &NSEvent) {
 }
 
 extern "C" fn scroll_wheel(this: &NSView, _sel: Sel, event: &NSEvent) {
+    log::info!("[SNE] extern scroll_wheel called");
     if !with_state(this, |state| state.on_scroll_event(event.retain()), || true) {
         return;
     }
@@ -610,6 +672,7 @@ extern "C" fn source_operation_mask_for_dragging_context(
     session: &NSDraggingSession,
     context: NSDraggingContext,
 ) -> NSDragOperation {
+    log::info!("[SNE] extern source_operation_mask_for_dragging_context called: context={:?}", context);
     with_state(
         this,
         move |state| state.source_operation_mask_for_dragging_context(session, context),
@@ -624,6 +687,7 @@ extern "C" fn dragging_session_ended_at_point(
     point: NSPoint,
     operation: NSDragOperation,
 ) {
+    log::info!("[SNE] extern dragging_session_ended_at_point called: point=({}, {}), operation={:?}", point.x, point.y, operation);
     with_state(
         this,
         move |state| state.drag_ended(session, point, operation),
@@ -637,11 +701,13 @@ extern "C" fn dragging_session_moved_to_point(
     session: &NSDraggingSession,
     point: NSPoint,
 ) {
+    log::info!("[SNE] extern dragging_session_moved_to_point called: point=({}, {})", point.x, point.y);
     with_state(this, move |state| state.drag_moved(session, point), || ())
 }
 
 extern "C" fn should_delay_window_ordering(this: &NSView, _: Sel, event: &NSEvent) -> Bool {
-    with_state(
+    log::info!("[SNE] extern should_delay_window_ordering called");
+    let result = with_state(
         this,
         move |state| {
             if state.should_delay_window_ordering(event) {
@@ -650,6 +716,11 @@ extern "C" fn should_delay_window_ordering(this: &NSView, _: Sel, event: &NSEven
                 Bool::NO
             }
         },
-        || Bool::YES,
-    )
+        || {
+            log::info!("[SNE] extern should_delay_window_ordering: no state, returning NO");
+            Bool::NO  // Don't delay window ordering when no drag context exists
+        },
+    );
+    log::info!("[SNE] extern should_delay_window_ordering returning: {:?}", result);
+    result
 }
